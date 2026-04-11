@@ -1,0 +1,382 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Lab 01 - VPC desde cero con AWS CLI
+# Espeja exactamente la arquitectura del terraform/ de este mismo lab.
+#
+# Arquitectura:
+#   VPC 10.0.0.0/16
+#   |-- Subnet publica  us-east-1a  10.0.1.0/24  -> IGW
+#   |-- Subnet publica  us-east-1b  10.0.2.0/24  -> IGW
+#   |-- Subnet privada  us-east-1a  10.0.11.0/24 -> NAT GW
+#   +-- Subnet privada  us-east-1b  10.0.12.0/24 -> NAT GW
+#
+# Uso:
+#   # Paso a paso (recomendado para aprender):
+#   source commands.sh   # carga las funciones sin ejecutar
+#   step_01_vpc
+#   step_02_subnets
+#   step_03_igw
+#   step_04_nat          # tarda ~90s
+#   step_05_routes
+#   step_06_sg
+#   verify
+#
+#   # Todo de una vez:
+#   bash commands.sh
+#
+#   # Cleanup al terminar:
+#   cleanup
+#
+# Pre-requisitos:
+#   aws configure  (o AWS_PROFILE exportado)
+#   aws --version >= 2.x
+# =============================================================================
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# VARIABLES - ajusta region y nombre si lo necesitas
+# ---------------------------------------------------------------------------
+REGION="us-east-1"
+PROJECT="epam-lab"
+
+VPC_CIDR="10.0.0.0/16"
+PUB_CIDR_1="10.0.1.0/24"
+PUB_CIDR_2="10.0.2.0/24"
+PRIV_CIDR_1="10.0.11.0/24"
+PRIV_CIDR_2="10.0.12.0/24"
+AZ1="us-east-1a"
+AZ2="us-east-1b"
+
+# IDs - se van llenando conforme avanzas
+VPC_ID=""
+SUBNET_PUB_1=""
+SUBNET_PUB_2=""
+SUBNET_PRIV_1=""
+SUBNET_PRIV_2=""
+IGW_ID=""
+EIP_ALLOC=""
+NAT_ID=""
+RT_PUB=""
+RT_PRIV=""
+SG_ID=""
+
+# ---------------------------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------------------------
+log() { echo -e "\n>>> $*"; }
+ok()  { echo "    OK: $*"; }
+
+# ---------------------------------------------------------------------------
+# PASO 1 - VPC
+# Concepto: contenedor de red aislado. Sin esto no hay nada.
+# ---------------------------------------------------------------------------
+step_01_vpc() {
+  log "PASO 1: Crear VPC ($VPC_CIDR)"
+
+  VPC_ID=$(aws ec2 create-vpc \
+    --cidr-block "$VPC_CIDR" \
+    --region "$REGION" \
+    --query 'Vpc.VpcId' \
+    --output text)
+
+  # Habilitar DNS hostnames (necesario para SSM y EKS)
+  aws ec2 modify-vpc-attribute \
+    --vpc-id "$VPC_ID" \
+    --enable-dns-hostnames '{"Value":true}'
+
+  aws ec2 modify-vpc-attribute \
+    --vpc-id "$VPC_ID" \
+    --enable-dns-support '{"Value":true}'
+
+  aws ec2 create-tags \
+    --resources "$VPC_ID" \
+    --tags "Key=Name,Value=${PROJECT}-vpc" "Key=ManagedBy,Value=cli-lab"
+
+  ok "VPC creada: $VPC_ID"
+  export VPC_ID
+}
+
+# ---------------------------------------------------------------------------
+# PASO 2 - Subnets
+# Concepto: publica = ruta al IGW + IP publica asignada automaticamente
+#           privada = ruta al NAT GW, sin IP publica directa
+# ---------------------------------------------------------------------------
+step_02_subnets() {
+  log "PASO 2: Crear subnets (2 publicas + 2 privadas)"
+
+  # Publica AZ1
+  SUBNET_PUB_1=$(aws ec2 create-subnet \
+    --vpc-id "$VPC_ID" \
+    --cidr-block "$PUB_CIDR_1" \
+    --availability-zone "$AZ1" \
+    --query 'Subnet.SubnetId' --output text)
+  aws ec2 modify-subnet-attribute \
+    --subnet-id "$SUBNET_PUB_1" \
+    --map-public-ip-on-launch
+  aws ec2 create-tags --resources "$SUBNET_PUB_1" \
+    --tags "Key=Name,Value=${PROJECT}-public-${AZ1}" "Key=Tier,Value=public"
+  ok "Subnet publica AZ1: $SUBNET_PUB_1"
+
+  # Publica AZ2
+  SUBNET_PUB_2=$(aws ec2 create-subnet \
+    --vpc-id "$VPC_ID" \
+    --cidr-block "$PUB_CIDR_2" \
+    --availability-zone "$AZ2" \
+    --query 'Subnet.SubnetId' --output text)
+  aws ec2 modify-subnet-attribute \
+    --subnet-id "$SUBNET_PUB_2" \
+    --map-public-ip-on-launch
+  aws ec2 create-tags --resources "$SUBNET_PUB_2" \
+    --tags "Key=Name,Value=${PROJECT}-public-${AZ2}" "Key=Tier,Value=public"
+  ok "Subnet publica AZ2: $SUBNET_PUB_2"
+
+  # Privada AZ1
+  SUBNET_PRIV_1=$(aws ec2 create-subnet \
+    --vpc-id "$VPC_ID" \
+    --cidr-block "$PRIV_CIDR_1" \
+    --availability-zone "$AZ1" \
+    --query 'Subnet.SubnetId' --output text)
+  aws ec2 create-tags --resources "$SUBNET_PRIV_1" \
+    --tags "Key=Name,Value=${PROJECT}-private-${AZ1}" "Key=Tier,Value=private"
+  ok "Subnet privada AZ1: $SUBNET_PRIV_1"
+
+  # Privada AZ2
+  SUBNET_PRIV_2=$(aws ec2 create-subnet \
+    --vpc-id "$VPC_ID" \
+    --cidr-block "$PRIV_CIDR_2" \
+    --availability-zone "$AZ2" \
+    --query 'Subnet.SubnetId' --output text)
+  aws ec2 create-tags --resources "$SUBNET_PRIV_2" \
+    --tags "Key=Name,Value=${PROJECT}-private-${AZ2}" "Key=Tier,Value=private"
+  ok "Subnet privada AZ2: $SUBNET_PRIV_2"
+
+  export SUBNET_PUB_1 SUBNET_PUB_2 SUBNET_PRIV_1 SUBNET_PRIV_2
+}
+
+# ---------------------------------------------------------------------------
+# PASO 3 - Internet Gateway
+# Concepto: puerta de salida/entrada para las subnets PUBLICAS.
+#           Sin esto las subnets publicas no tienen internet.
+#           Diferencia clave vs NAT: IGW es bidireccional (entra y sale).
+# ---------------------------------------------------------------------------
+step_03_igw() {
+  log "PASO 3: Crear y adjuntar Internet Gateway"
+
+  IGW_ID=$(aws ec2 create-internet-gateway \
+    --query 'InternetGateway.InternetGatewayId' --output text)
+  aws ec2 create-tags --resources "$IGW_ID" \
+    --tags "Key=Name,Value=${PROJECT}-igw"
+
+  aws ec2 attach-internet-gateway \
+    --internet-gateway-id "$IGW_ID" \
+    --vpc-id "$VPC_ID"
+
+  ok "IGW creado y adjuntado: $IGW_ID"
+  export IGW_ID
+}
+
+# ---------------------------------------------------------------------------
+# PASO 4 - Elastic IP + NAT Gateway
+# Concepto: NAT GW permite que las subnets PRIVADAS salgan a internet
+#           (para instalar paquetes) SIN tener IP publica propia.
+#           Solo salida - el trafico de entrada no puede iniciar desde fuera.
+#           El NAT GW vive en subnet PUBLICA (necesita IGW para salir).
+# Nota: tarda ~2 minutos en quedar disponible.
+# ---------------------------------------------------------------------------
+step_04_nat() {
+  log "PASO 4: Crear Elastic IP y NAT Gateway (va en subnet PUBLICA)"
+
+  EIP_ALLOC=$(aws ec2 allocate-address \
+    --domain vpc \
+    --query 'AllocationId' --output text)
+  ok "EIP alocada: $EIP_ALLOC"
+
+  NAT_ID=$(aws ec2 create-nat-gateway \
+    --subnet-id "$SUBNET_PUB_1" \
+    --allocation-id "$EIP_ALLOC" \
+    --query 'NatGateway.NatGatewayId' --output text)
+
+  log "Esperando NAT Gateway disponible (~90s)..."
+  aws ec2 wait nat-gateway-available --nat-gateway-ids "$NAT_ID"
+
+  aws ec2 create-tags --resources "$NAT_ID" \
+    --tags "Key=Name,Value=${PROJECT}-nat-gw" 2>/dev/null || true
+
+  ok "NAT Gateway disponible: $NAT_ID"
+  export EIP_ALLOC NAT_ID
+}
+
+# ---------------------------------------------------------------------------
+# PASO 5 - Route Tables
+# Concepto: tabla publica  -> default route al IGW (0.0.0.0/0 -> igw-xxx)
+#           tabla privada  -> default route al NAT GW (0.0.0.0/0 -> nat-xxx)
+#           Cada subnet se asocia a UNA route table.
+#           La VPC tiene una Main RT por default - no la usamos directamente.
+# ---------------------------------------------------------------------------
+step_05_routes() {
+  log "PASO 5: Crear Route Tables y asociar subnets"
+
+  # Route Table PUBLICA -> IGW
+  RT_PUB=$(aws ec2 create-route-table \
+    --vpc-id "$VPC_ID" \
+    --query 'RouteTable.RouteTableId' --output text)
+  aws ec2 create-tags --resources "$RT_PUB" \
+    --tags "Key=Name,Value=${PROJECT}-public-rt"
+
+  aws ec2 create-route \
+    --route-table-id "$RT_PUB" \
+    --destination-cidr-block "0.0.0.0/0" \
+    --gateway-id "$IGW_ID"
+
+  aws ec2 associate-route-table --route-table-id "$RT_PUB" --subnet-id "$SUBNET_PUB_1"
+  aws ec2 associate-route-table --route-table-id "$RT_PUB" --subnet-id "$SUBNET_PUB_2"
+  ok "Route Table publica: $RT_PUB -> $IGW_ID"
+
+  # Route Table PRIVADA -> NAT GW
+  RT_PRIV=$(aws ec2 create-route-table \
+    --vpc-id "$VPC_ID" \
+    --query 'RouteTable.RouteTableId' --output text)
+  aws ec2 create-tags --resources "$RT_PRIV" \
+    --tags "Key=Name,Value=${PROJECT}-private-rt"
+
+  aws ec2 create-route \
+    --route-table-id "$RT_PRIV" \
+    --destination-cidr-block "0.0.0.0/0" \
+    --nat-gateway-id "$NAT_ID"
+
+  aws ec2 associate-route-table --route-table-id "$RT_PRIV" --subnet-id "$SUBNET_PRIV_1"
+  aws ec2 associate-route-table --route-table-id "$RT_PRIV" --subnet-id "$SUBNET_PRIV_2"
+  ok "Route Table privada: $RT_PRIV -> $NAT_ID"
+
+  export RT_PUB RT_PRIV
+}
+
+# ---------------------------------------------------------------------------
+# PASO 6 - Security Group
+# Concepto: firewall stateful a nivel de instancia (no de subnet).
+#           Solo egress abierto: instancia privada, acceso por SSM.
+#           SSM no necesita inbound SSH (puerto 22).
+# ---------------------------------------------------------------------------
+step_06_sg() {
+  log "PASO 6: Crear Security Group para EC2 privada"
+
+  SG_ID=$(aws ec2 create-security-group \
+    --group-name "${PROJECT}-private-ec2-sg" \
+    --description "SG para EC2 en subnet privada (solo egress)" \
+    --vpc-id "$VPC_ID" \
+    --query 'GroupId' --output text)
+  aws ec2 create-tags --resources "$SG_ID" \
+    --tags "Key=Name,Value=${PROJECT}-private-ec2-sg"
+
+  # Solo egress: SSM no necesita inbound
+  # El inbound ya esta denegado por default (no agregamos reglas ingress)
+  ok "Security Group: $SG_ID (solo egress abierto)"
+  export SG_ID
+}
+
+# ---------------------------------------------------------------------------
+# VERIFICACION - resumen de recursos y validacion de rutas
+# ---------------------------------------------------------------------------
+verify() {
+  log "VERIFICACION: Resumen de recursos creados"
+  echo ""
+  echo "  VPC:              $VPC_ID"
+  echo "  Subnet publica 1: $SUBNET_PUB_1  ($PUB_CIDR_1 / $AZ1)"
+  echo "  Subnet publica 2: $SUBNET_PUB_2  ($PUB_CIDR_2 / $AZ2)"
+  echo "  Subnet privada 1: $SUBNET_PRIV_1 ($PRIV_CIDR_1 / $AZ1)"
+  echo "  Subnet privada 2: $SUBNET_PRIV_2 ($PRIV_CIDR_2 / $AZ2)"
+  echo "  IGW:              $IGW_ID"
+  echo "  EIP Alloc:        $EIP_ALLOC"
+  echo "  NAT Gateway:      $NAT_ID"
+  echo "  RT Publica:       $RT_PUB"
+  echo "  RT Privada:       $RT_PRIV"
+  echo "  Security Group:   $SG_ID"
+  echo ""
+  echo "  Rutas en RT privada:"
+  aws ec2 describe-route-tables \
+    --route-table-ids "$RT_PRIV" \
+    --query 'RouteTables[0].Routes[*].[DestinationCidrBlock,NatGatewayId,State]' \
+    --output table
+}
+
+# ---------------------------------------------------------------------------
+# RUN ALL - ejecuta todos los pasos en orden
+# ---------------------------------------------------------------------------
+run_all() {
+  step_01_vpc
+  step_02_subnets
+  step_03_igw
+  step_04_nat
+  step_05_routes
+  step_06_sg
+  verify
+  log "Lab 01 VPC completo via CLI."
+  log "Para destruir ejecuta: cleanup"
+}
+
+# ---------------------------------------------------------------------------
+# CLEANUP - borra todo en orden inverso (dependencias inversas)
+# IMPORTANTE: el NAT GW y la EIP generan costo si los dejas corriendo.
+# ---------------------------------------------------------------------------
+cleanup() {
+  log "CLEANUP: Eliminando recursos del Lab 01 VPC"
+
+  # SG primero (no tiene dependencias)
+  [[ -n "$SG_ID" ]] && \
+    aws ec2 delete-security-group --group-id "$SG_ID" && ok "SG eliminado"
+
+  # Route Tables (desasociar primero, luego eliminar)
+  for RT in "$RT_PUB" "$RT_PRIV"; do
+    if [[ -n "$RT" ]]; then
+      ASSOC_IDS=$(aws ec2 describe-route-tables \
+        --route-table-ids "$RT" \
+        --query 'RouteTables[0].Associations[?Main==`false`].RouteTableAssociationId' \
+        --output text)
+      for id in $ASSOC_IDS; do
+        aws ec2 disassociate-route-table --association-id "$id"
+      done
+      aws ec2 delete-route-table --route-table-id "$RT" && ok "RT eliminada: $RT"
+    fi
+  done
+
+  # NAT Gateway (tarda ~1 min en eliminarse)
+  if [[ -n "$NAT_ID" ]]; then
+    aws ec2 delete-nat-gateway --nat-gateway-id "$NAT_ID"
+    log "Esperando que NAT Gateway se elimine (~60s)..."
+    aws ec2 wait nat-gateway-deleted --nat-gateway-ids "$NAT_ID"
+    ok "NAT Gateway eliminado"
+  fi
+
+  # EIP (liberar despues del NAT GW)
+  [[ -n "$EIP_ALLOC" ]] && \
+    aws ec2 release-address --allocation-id "$EIP_ALLOC" && ok "EIP liberada"
+
+  # IGW (detach antes de delete)
+  if [[ -n "$IGW_ID" && -n "$VPC_ID" ]]; then
+    aws ec2 detach-internet-gateway \
+      --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID"
+    aws ec2 delete-internet-gateway --internet-gateway-id "$IGW_ID"
+    ok "IGW eliminado"
+  fi
+
+  # Subnets
+  for sn in "$SUBNET_PUB_1" "$SUBNET_PUB_2" "$SUBNET_PRIV_1" "$SUBNET_PRIV_2"; do
+    [[ -n "$sn" ]] && aws ec2 delete-subnet --subnet-id "$sn" && ok "Subnet eliminada: $sn"
+  done
+
+  # VPC al final (cuando ya no tiene dependencias)
+  [[ -n "$VPC_ID" ]] && \
+    aws ec2 delete-vpc --vpc-id "$VPC_ID" && ok "VPC eliminada"
+
+  log "Cleanup completo. Sin recursos huerfanos."
+}
+
+# ---------------------------------------------------------------------------
+# ENTRY POINT
+# Si ejecutas el script directamente: bash commands.sh -> corre todo
+# Si lo sourceas: source commands.sh -> puedes llamar cada funcion sola
+# ---------------------------------------------------------------------------
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  run_all
+fi
