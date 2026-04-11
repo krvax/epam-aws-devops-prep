@@ -756,3 +756,4 @@ Cada documento incluye diagnóstico paso a paso y formato STAR para entrevista.
 | [01-librechat-ingress](./troubleshooting/01-librechat-ingress.md) | Runbook | Ingress no genera ALB — annotations ausentes en `values.yaml` |
 | [02-jwt-dst-incident](./troubleshooting/02-jwt-dst-incident.md) | Post-mortem | `TokenExpiredError` por timezone mismatch en cambio DST |
 | [03-eks-target-group-unhealthy](./troubleshooting/03-eks-target-group-unhealthy.md) | Runbook | ALB existe pero Target Group muestra targets `unhealthy` |
+| [04-akamai-tls-handshake-5xx](./troubleshooting/04-akamai-tls-handshake-5xx.md) | Post-mortem | Akamai cert pinning mismatch → 5xx tras rotación de certificado en origin (AEM/Konector) |
