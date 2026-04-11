@@ -1,306 +1,228 @@
-# 🚨 Incidente: JWT TokenExpiredError por cambio de horario (DST)
+# 🚨 Incident: JWT TokenExpiredError por cambio de horario (DST)
+
+> **Tipo:** Post-mortem / Incident Review
+> **Severidad:** P2
+> **Área:** Integración con sistema externo — validación de JWT en EKS
+
+---
 
 ## Resumen ejecutivo
 
 | Campo | Detalle |
 |-------|---------|
-| **Fecha** | [YYYY-MM-DD] |
-| **Severity** | P2 |
-| **Duración** | [X horas] |
-| **Servicio afectado** | API en EKS |
-| **Síntoma** | Archivos JSON rechazados como inválidos |
-| **Causa raíz** | Tokens JWT generados por sistema externo con timezone local, validados en EKS con UTC |
-| **Detectado por** | PagerDuty → New Relic / Datadog |
+| **Severidad** | P2 |
+| **Servicio afectado** | API de procesamiento de archivos en EKS |
+| **Síntoma visible** | Archivos JSON rechazados como inválidos |
+| **Error real** | `TokenExpiredError: jwt expired` en la validación del token |
+| **Causa raíz** | Sistema externo genera tokens con `exp` en timezone local; API en EKS valida en UTC |
+| **Trigger** | Cambio de horario (DST) creó desfase de 1 hora entre el `exp` generado y el `exp` esperado |
+| **Detectado por** | PagerDuty → New Relic (APM) + Datadog (Logs) |
 
 ---
 
-## Timeline del incidente
+## Timeline
 
 ```text
-[HH:MM] 🔔 PagerDuty alerta: "API receiving invalid files" (P2)
-   │
-   ├─→ SRE on-call recibe la alerta
-   │
-[HH:MM] 🔍 Revisión en New Relic
-   │     → Error rate elevado en la API
-   │     → Traces mostrando: TokenExpiredError: jwt expired
-   │
-[HH:MM] 🔍 Revisión en Datadog
-   │     → Logs confirmando: "TokenExpiredError" en pods de EKS
-   │     → Spike de errores 401 coincide exactamente con cambio de horario DST
-   │
-[HH:MM] 🧠 Identificación de causa raíz
-   │     → El sistema externo que genera los tokens usa timezone LOCAL
-   │     → Nuestra API en EKS valida usando UTC
-   │     → El cambio DST creó un desfase en el claim "exp" del JWT
-   │
-[HH:MM] 🔧 Mitigación aplicada
-   │     → [Coordinación con equipo externo / workaround temporal]
-   │
-[HH:MM] ✅ Servicio recuperado, error rate vuelve a normal
+[HH:MM] 🔔 PagerDuty dispara P2: "API receiving invalid files — high error rate"
+[HH:MM] 🔍 New Relic APM: spike de errores → TokenExpiredError: jwt expired
+[HH:MM] 🔍 Datadog Logs: los errores empiezan exactamente al cambio de horario DST
+[HH:MM] 🧠 Causa raíz identificada: desfase UTC vs timezone local en el claim exp
+[HH:MM] 🔧 Coordinación con equipo del sistema externo para mitigación
+[HH:MM] ✅ Error rate vuelve a cero, archivos procesados normalmente
 ```
 
 ---
 
 ## ¿Qué estaba pasando?
 
-### El flujo normal
+### Flujo normal
 
 ```text
-Sistema externo (fuera de EKS)         Nuestra API (EKS)
-──────────────────────────────         ─────────────────
-1. Genera JWT                       
-   exp = now() + 1 hora             
-   Token: { exp: 1699336800 }  ──→  2. Recibe archivo JSON + JWT
-                                     3. Valida JWT:
-                                        ¿exp > now()? ✅
-                                     4. Procesa archivo
+Sistema externo                     API en EKS
+──────────────                      ──────────
+Genera JWT:
+  exp = now() + 3600          ──→   Valida: exp > now() ✅
+  (en timezone LOCAL)               (en UTC)
 ```
 
 ### Lo que pasó con DST
 
 ```text
-=== ANTES DEL CAMBIO DST ===
+=== Antes del cambio DST ===
+Sistema externo (America/New_York):
+  Hora local: 1:30 AM EST → exp = 2:30 AM EST → en UTC: 7:30 AM UTC ✅
 
-Sistema externo (timezone: America/New_York)
-  Hora local: 1:30 AM EST
-  Genera token: exp = 2:30 AM EST (1 hora)
-  En UTC: exp = 7:30 AM UTC ✅
+=== Cambio DST: 2:00 AM → retrocede a 1:00 AM ===
+Sistema externo:
+  Reloj retrocede, sigue calculando exp con hora LOCAL
+  exp calculado no coincide con UTC
 
-=== CAMBIO DST: 2:00 AM → 1:00 AM ===
-
-Sistema externo (timezone: America/New_York)
-  El reloj retrocede a 1:00 AM
-  Los tokens generados en ese rango tienen un "exp"
-  calculado con hora local que ya no coincide con UTC
-
-  Escenario A: token "del futuro"
-  → Generado a las 1:30 AM (primera vez)
-  → Reloj vuelve a 1:00 AM
-  → El token parece válido por 1.5 horas más de lo esperado
-
-  Escenario B: token ya expirado al llegar
-  → Sistema externo calcula exp con hora local
-  → Nuestra API valida con UTC
-  → El cálculo no coincide → TokenExpiredError ❌
-
-Nuestra API (EKS, usando UTC)
-  Recibe token con exp calculado en hora local del sistema externo
-  exp no coincide → TokenExpiredError
-  Rechaza el archivo JSON como inválido → error reportado como "invalid file"
+API en EKS (UTC):
+  Recibe token con exp en hora local del sistema externo
+  exp < now() (en UTC) → TokenExpiredError ❌
+  Rechaza el archivo como "invalid file"
 ```
 
 ### El problema de fondo
 
-```text
-┌──────────────────────────────────────────────────────┐
-│                                                        │
-│  Sistema externo:  new Date() → hora LOCAL             │
-│                    exp = localTime + 3600              │
-│                                                        │
-│  Nuestra API EKS:  new Date() → UTC                    │
-│                    if (exp < Date.now()) → EXPIRED ❌  │
-│                                                        │
-│  EL PROBLEMA:                                          │
-│  Mezclar timezones entre sistemas al calcular          │
-│  la expiración del JWT                                 │
-│                                                        │
-└──────────────────────────────────────────────────────┘
-```
+El sistema externo usaba `new Date()` con el timezone del sistema operativo
+(America/New_York) en vez de UTC para calcular `exp`. Al cambiar el horario,
+el desfase entre los dos sistemas superó el margen de tolerancia de la validación.
 
-> ⚠️ **Nota importante:** La causa estaba en el sistema externo, fuera de nuestro
-> control directo. Los archivos JSON eran válidos; el problema era el token que
-> los acompañaba.
+> ⚠️ Los archivos JSON eran **válidos**. El problema era el token adjunto,
+> generado por un sistema fuera de nuestro control directo.
 
 ---
 
-## Paso a paso: Cómo lo diagnostiqué
+## Diagnóstico
 
-### Paso 1: Recibí la alerta de PagerDuty
-
-```text
-🔔 PagerDuty Alert - P2
-Service: api-files-processor
-Alert: "High error rate - invalid files received"
-Triggered at: [timestamp]
-```
-
-**Acción:** Acknowledge la alerta para que el equipo sepa que alguien está investigando.
-
-### Paso 2: Fui a New Relic (APM)
+### Paso 1 — Acknowledge en PagerDuty y abrir el incidente
 
 ```text
-New Relic → APM → [nombre del servicio] → Errors
-
-1. Error rate → Vi un spike claro
-2. Click en el error más frecuente
-3. Error message: "TokenExpiredError: jwt expired"
-4. Stack trace → Apuntaba al middleware de validación JWT
-5. Transactions → Las requests llegaban pero fallaban en la validación del token
+🔔 Alert: "API receiving invalid files — high error rate"
+Acción: Acknowledge → avisar al equipo → abrir canal de incidente
 ```
 
-**Query NRQL útil:**
+### Paso 2 — New Relic APM
+
+```text
+APM → [servicio] → Errors
+  ├── Error rate: spike claro a partir de [HH:MM]
+  ├── Error más frecuente: "TokenExpiredError: jwt expired"
+  └── Stack trace: apunta al middleware de validación JWT
+```
+
+Query NRQL útil:
+
 ```sql
-SELECT count(*) 
-FROM TransactionError 
-WHERE appName = 'api-files-processor' 
-AND error.message LIKE '%TokenExpired%' 
-SINCE 3 hours ago 
+SELECT count(*)
+FROM TransactionError
+WHERE appName = 'api-files-processor'
+  AND error.message LIKE '%TokenExpired%'
+SINCE 3 hours ago
 TIMESERIES 5 minutes
 ```
 
-### Paso 3: Fui a Datadog (Logs + Infra)
+### Paso 3 — Datadog Logs
 
 ```text
-Datadog → Logs → Filtrar:
+Filtro: service:api-files-processor status:error "TokenExpiredError"
 
-1. service:api-files-processor status:error
-2. Vi los logs con "TokenExpiredError: jwt expired"
-3. El timestamp de los errores coincidía exactamente con el cambio de horario DST
-
-Datadog → Infrastructure → Kubernetes:
-4. Los pods estaban healthy (no era problema de infra nuestra)
-5. CPU/Memory normales
-6. El problema no era de recursos ni de código nuestro
+Hallazgo clave:
+  Los errores empiezan exactamente al momento del cambio de horario DST
+  Los pods en EKS están healthy — CPU/Memory normales
+  El problema no es de infraestructura nuestra
 ```
 
-**Query de logs útil:**
-```
-service:api-files-processor "TokenExpiredError"
-```
+### Paso 4 — Correlación y causa raíz
 
-### Paso 4: Correlacioné los datos
-
-```text
-New Relic me dijo  → QUÉ estaba fallando (JWT validation, 401s)
-Datadog me dijo    → CUÁNDO empezó (exacto al cambio DST)
-La combinación     → POR QUÉ: el sistema externo genera tokens con hora local,
-                     nosotros validamos en UTC → desfase al cambio de horario
-```
-
-### Paso 5: Confirmé la causa raíz
-
-```text
-- El error TokenExpiredError solo aparece desde el cambio de horario
-- Nuestra infraestructura y código están en UTC (correcto)
-- La fuente del problema está en el sistema externo que genera los tokens
-- Ese sistema usa timezone local (America/New_York) en vez de UTC
-```
-
-### Paso 6: Mitigación
-
-```text
-Dado que la causa está en el sistema externo:
-
-Opción A (corto plazo):
-  → Notificar al equipo/proveedor del sistema externo
-  → Solicitarles que configuren TZ=UTC en su generador de tokens
-
-Opción B (workaround temporal si aplica):
-  → Ampliar la ventana de tolerancia en la validación del JWT
-     (clock skew tolerance) para absorber el desfase de 1 hora
-  → SOLO como medida temporal mientras se coordina el fix real
-
-Opción C (largo plazo):
-  → Agregar validación defensiva que detecte tokens con exp en hora local
-  → Documentar el contrato: los tokens DEBEN usar UTC
-```
-
-### Paso 7: Verifiqué la recuperación
-
-```text
-1. New Relic → Error rate volvió a 0%
-2. Datadog → No más logs de TokenExpiredError
-3. PagerDuty → Resolví la alerta
-4. Los archivos JSON se empezaron a procesar normalmente
-```
+| Fuente | Qué nos dijo |
+|--------|-------------|
+| New Relic | **Qué** fallaba: validación JWT, error 401 |
+| Datadog | **Cuándo** empezó: exacto al cambio DST |
+| Combinación | **Por qué**: sistema externo usa timezone local, nosotros UTC |
 
 ---
 
-## Causa raíz (Root Cause)
+## Fix y mitigación
+
+### Fix permanente (sistema externo — requiere coordinación)
 
 ```text
-El sistema externo que genera los JWT tokens usaba timezone local
-(America/New_York) en vez de UTC para calcular el claim "exp".
-
-Cuando ocurrió el cambio de horario (DST), el claim "exp" quedó
-desfasado 1 hora respecto a lo que nuestra API en EKS esperaba (UTC).
-
-Los archivos JSON que llegaban eran válidos, pero el token adjunto
-no pasaba la validación de expiración → rechazado como "invalid file".
+Solicitar al equipo responsable:
+1. Configurar el servidor generador de tokens en UTC (TZ=UTC)
+2. Usar Date.now() / 1000 para el campo exp — nunca depender del TZ del OS
+3. Documentar el contrato: exp DEBE ser timestamp Unix UTC
 ```
 
----
-
-## Fix permanente
-
-### En el sistema externo (coordinación requerida)
-
-```text
-Solicitar al equipo responsable del sistema externo que:
-1. Configuren el servidor/proceso generador de tokens en UTC
-2. Usen siempre Math.floor(Date.now() / 1000) para el campo exp
-3. No dependan del timezone del sistema operativo para cálculos de JWT
-```
-
-### En nuestra API (defensa propia)
+### Mitigación temporal (nuestra API)
 
 ```javascript
-// Agregar tolerancia a pequeños desfases de reloj (clock skew)
-// Esto absorbe diferencias menores pero NO es el fix real
-
 const jwt = require('jsonwebtoken');
 
 jwt.verify(token, secret, {
-  clockTolerance: 300  // 5 minutos de tolerancia (en segundos)
+  clockTolerance: 300
 });
-
-// Para DST (1 hora = 3600s), esto NO alcanza.
-// El fix real debe venir del sistema externo.
 ```
 
-### Contrato documentado entre sistemas
+> ⚠️ `clockTolerance` de 300s no cubre 1 hora de desfase DST.
+> Es solo un buffer para pequeñas derivas de reloj entre sistemas.
+> El fix real debe venir del sistema externo.
+
+### Contrato de integración documentado
 
 ```text
-📋 Contrato de integración: tokens JWT
+📋 Contrato JWT entre sistemas
 
-- El campo "exp" DEBE ser un timestamp Unix en UTC
+- El campo exp DEBE ser timestamp Unix UTC
 - Se calcula como: Math.floor(Date.now() / 1000) + <segundos de validez>
-- El servidor que genera tokens DEBE correr en UTC (TZ=UTC)
-- Cualquier desviación de este contrato causará rechazos en validación
+- El servidor generador de tokens DEBE correr en UTC (TZ=UTC)
+- Desviaciones de este contrato causarán rechazos de validación
 ```
+
+---
+
+## Verificación de recuperación
+
+```bash
+# New Relic: error rate volvió a 0%
+# Datadog: sin logs de TokenExpiredError
+# PagerDuty: alerta resuelta
+# Archivos: procesándose normalmente
+```
+
+---
+
+## Cómo contarlo en entrevista (STAR)
+
+**Situation:** Teníamos una API en EKS que empezó a rechazar archivos JSON como
+inválidos justo al cambio de horario de DST. PagerDuty nos alertó con un P2.
+
+**Task:** Diagnosticar la causa del spike de errores sin contexto previo,
+en el menor tiempo posible.
+
+**Action:** Empecé con New Relic para identificar el tipo de error
+(`TokenExpiredError`), luego fui a Datadog para correlacionar el timestamp
+de inicio con el cambio de horario. Eso me llevó a revisar cómo el sistema
+externo generaba el campo `exp` del JWT — encontramos que usaba timezone local
+en vez de UTC.
+
+**Result:** Identificamos la causa raíz sin tocar nuestro código ni reiniciar
+pods. Coordinamos el fix con el equipo externo y documentamos el contrato de
+integración para prevenir la recurrencia.
+
+---
+
+> **Frase clave para entrevista:**
+> *"The symptom was in our API, but the root cause was in a system we didn't own.
+> The key was not assuming the problem was ours — we used New Relic to identify
+> what was failing and Datadog to pinpoint when it started, which pointed
+> directly at the DST change and the timezone mismatch."*
 
 ---
 
 ## Lecciones aprendidas
 
-### ✅ Qué hicimos bien
-- PagerDuty detectó el problema rápidamente
-- Teníamos observabilidad en New Relic y Datadog
-- El diagnóstico fue metódico: descartamos infra propia antes de señalar al externo
-- No hicimos cambios apresurados en nuestro código antes de entender la causa
+**✅ Qué funcionó bien**
+- PagerDuty detectó el problema antes de que llegaran quejas de usuarios
+- Tener New Relic + Datadog permitió correlacionar QUÉ y CUÁNDO rápidamente
+- No hicimos cambios apresurados antes de entender la causa
 
-### ❌ Qué debemos mejorar
-1. **No había contrato documentado** con el sistema externo sobre timezones en JWT
-2. **La alerta era genérica** ("invalid files") en vez de apuntar a JWT directamente
-3. **No teníamos test de integración** que simulara tokens de sistemas externos
-4. **Falta de runbook** para incidentes con dependencias externas
+**⬜ Action items**
 
-### 🛡️ Action items
-
-| # | Acción | Owner | Estado |
-|---|--------|-------|--------|
-| 1 | Notificar al equipo del sistema externo y solicitar fix (TZ=UTC) | SRE / PM | ⬜ |
-| 2 | Documentar contrato de integración JWT entre sistemas | Dev | ⬜ |
-| 3 | Agregar alerta específica para TokenExpiredError (no solo "invalid files") | SRE | ⬜ |
-| 4 | Evaluar clock skew tolerance como mitigación temporal | Dev | ⬜ |
-| 5 | Agregar test de integración con tokens de sistema externo | Dev | ⬜ |
-| 6 | Escribir runbook para incidentes con dependencias externas | SRE | ⬜ |
+| Acción | Owner | Estado |
+|--------|-------|--------|
+| Solicitar fix al equipo del sistema externo (TZ=UTC en generador de tokens) | SRE/PM | ⬜ |
+| Documentar contrato de integración JWT entre sistemas | Dev | ⬜ |
+| Crear alerta específica para `TokenExpiredError` (no solo "invalid files") | SRE | ⬜ |
+| Evaluar `clockTolerance` como mitigación mientras llega el fix | Dev | ⬜ |
+| Agregar test de integración con tokens de sistema externo | Dev | ⬜ |
+| Escribir runbook para incidentes con dependencias externas | SRE | ⬜ |
 
 ---
 
 ## Referencias
 
-- [JWT RFC 7519 - exp claim](https://tools.ietf.org/html/rfc7519#section-4.1.4)
-- [DST y sus problemas en sistemas distribuidos](https://codeblog.jonskeet.uk/2019/03/27/storing-utc-is-not-a-silver-bullet/)
-- [jsonwebtoken clockTolerance option](https://github.com/auth0/node-jsonwebtoken#jwtverifytoken-secretorpublickey-options-callback)
+- [JWT RFC 7519 — exp claim](https://tools.ietf.org/html/rfc7519#section-4.1.4)
+- [jsonwebtoken clockTolerance](https://github.com/auth0/node-jsonwebtoken#jwtverifytoken-secretorpublickey-options-callback)
+- [DST y sistemas distribuidos](https://codeblog.jonskeet.uk/2019/03/27/storing-utc-is-not-a-silver-bullet/)
