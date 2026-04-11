@@ -2,146 +2,126 @@
 """
 generate_logs.py
 
-Simula el access.log de un ALB/nginx frente a una app corriendo en EKS.
-Los endpoints y patrones de error reflejan lo que Prometheus estaría
-scrapeando en el lab-07-monitoring.
+Simula el app.log de una EC2 con CloudWatch Agent (lab-09-cloudwatch-logs).
+Formato JSON estructurado — idéntico al que produce loggen.sh en la EC2.
+Incluy e request_id, latency_ms, user, endpoint — útil para:
+  - CloudWatch Logs Insights queries
+  - Ejercicios de scripting (jq, python, bash)
+  - Correlación por request_id / trace_id
 
 Uso:
-    python generate_logs.py              # genera 500 líneas en access.log
-    python generate_logs.py --lines 2000 # genera N líneas
-    python generate_logs.py --out /tmp/access.log
+    python generate_logs.py                   # 500 líneas -> app.log
+    python generate_logs.py --lines 2000
+    python generate_logs.py --out /tmp/app.log
 """
 
 import argparse
+import json
 import random
+import uuid
 import datetime
-import ipaddress
 
 # ---------------------------------------------------------------------------
-# Configuración — refleja los endpoints reales del lab-07 (EKS + Prometheus)
+# Config — mismos endpoints que loggen.sh (lab-09)
 # ---------------------------------------------------------------------------
 
 ENDPOINTS = [
-    # (path, method, peso relativo, status_codes_posibles)
-    ("/health",              "GET",    20, [200, 200, 200, 200, 503]),
-    ("/metrics",             "GET",    15, [200, 200, 200, 500]),
-    ("/api/v1/users",        "GET",    12, [200, 200, 200, 404, 500]),
-    ("/api/v1/users",        "POST",    8, [201, 201, 400, 500]),
-    ("/api/v1/payments",     "POST",   10, [201, 201, 201, 400, 500, 502]),
-    ("/api/v1/payments",     "GET",     8, [200, 200, 404, 500]),
-    ("/api/v1/orders",       "GET",    10, [200, 200, 200, 404]),
-    ("/api/v1/orders",       "POST",    5, [201, 201, 400, 500, 503]),
-    ("/login",               "POST",    6, [200, 200, 401, 429]),
-    ("/logout",              "POST",    3, [200, 204]),
-    ("/static/main.js",      "GET",     2, [200, 304]),
-    ("/favicon.ico",         "GET",     1, [200, 404]),
+    ("/health",          "GET",   18),
+    ("/login",           "POST",   8),
+    ("/logout",          "POST",   3),
+    ("/checkout",        "POST",  10),
+    ("/search",          "GET",   14),
+    ("/items",           "GET",   12),
+    ("/items/42",        "GET",    8),
+    ("/api/v1/payments", "POST",  10),
+    ("/api/v1/orders",   "GET",    9),
+    ("/metrics",         "GET",    8),
 ]
 
-HTTP_VERSIONS = ["HTTP/1.1", "HTTP/1.1", "HTTP/2.0"]
+USERS = ["alice", "bob", "carol", "dave", "erin", "svc-account"]
 
-RESPONSE_SIZES = {
-    200: (512,  8192),
-    201: (256,  2048),
-    204: (0,    0),
-    304: (0,    0),
-    400: (128,  512),
-    401: (128,  256),
-    404: (256,  512),
-    429: (128,  256),
-    500: (256,  1024),
-    502: (256,  512),
-    503: (256,  512),
-}
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def random_ip():
-    """Genera IPs de rangos privados (simula pods/clientes internos)."""
-    ranges = [
-        ("10.0.0.1",   "10.0.255.254"),
-        ("172.16.0.1", "172.16.255.254"),
-        ("192.168.1.1","192.168.10.254"),
-    ]
-    lo, hi = random.choice(ranges)
-    lo_int = int(ipaddress.IPv4Address(lo))
-    hi_int = int(ipaddress.IPv4Address(hi))
-    return str(ipaddress.IPv4Address(random.randint(lo_int, hi_int)))
+ERROR_MESSAGES = ["db_timeout", "null_pointer", "upstream_502"]
 
 
-def random_timestamp(base: datetime.datetime, jitter_seconds: int = 1):
-    """Avanza el timestamp con un pequeño jitter para simular tráfico real."""
-    delta = datetime.timedelta(seconds=random.randint(0, jitter_seconds))
-    return base + delta
-
-
-def build_line(ts: datetime.datetime, ip: str, method: str, path: str,
-               http_ver: str, status: int, size: int) -> str:
-    """
-    Formato Combined Log Format (igual al que usa nginx/ALB access logs):
-    {ip} - - [{timestamp}] "{method} {path} {http_ver}" {status} {size}
-    """
-    ts_str = ts.strftime("%d/%b/%Y:%H:%M:%S +0000")
-    return f'{ip} - - [{ts_str}] "{method} {path} {http_ver}" {status} {size}'
-
-
-def weighted_choice(endpoints):
-    """Selecciona un endpoint según su peso relativo."""
-    total = sum(e[3] for e in [(p, m, w, sc) for p, m, w, sc in endpoints])
+def weighted_endpoint():
+    total = sum(w for _, _, w in ENDPOINTS)
     r = random.uniform(0, total)
     cumulative = 0
-    for path, method, weight, statuses in endpoints:
+    for path, method, weight in ENDPOINTS:
         cumulative += weight
         if r <= cumulative:
-            return path, method, statuses
-    return endpoints[-1][0], endpoints[-1][1], endpoints[-1][3]
+            return path, method
+    return ENDPOINTS[-1][0], ENDPOINTS[-1][1]
 
 
-# ---------------------------------------------------------------------------
-# Generador principal
-# ---------------------------------------------------------------------------
+def make_record(ts: datetime.datetime) -> dict:
+    path, method = weighted_endpoint()
+    r = random.randint(0, 99)
+    if r < 85:
+        status, level = 200, "INFO"
+    elif r < 93:
+        status, level = 400, "WARN"
+    else:
+        status, level = 500, "ERROR"
+
+    latency = random.randint(10, 1990)
+    # latencia más alta en errores (realista)
+    if status == 500:
+        latency = random.randint(800, 2500)
+
+    error = ""
+    if status == 500:
+        error = random.choice(ERROR_MESSAGES)
+
+    return {
+        "ts":         ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "level":      level,
+        "request_id": str(uuid.uuid4()),
+        "user":       random.choice(USERS),
+        "method":     method,
+        "endpoint":   path,
+        "status":     status,
+        "latency_ms": latency,
+        "error":      error,
+    }
+
 
 def generate(n_lines: int, output_path: str):
     now = datetime.datetime.utcnow().replace(microsecond=0)
-    # El log arranca 'n_lines' segundos atrás para tener un rango de tiempo
-    start = now - datetime.timedelta(seconds=n_lines)
-    ts = start
+    ts  = now - datetime.timedelta(seconds=n_lines * 2)
 
-    lines = []
+    records = []
     for _ in range(n_lines):
-        path, method, statuses = weighted_choice(ENDPOINTS)
-        status = random.choice(statuses)
-        lo, hi = RESPONSE_SIZES.get(status, (256, 1024))
-        size = random.randint(lo, hi) if hi > 0 else 0
-        ip = random_ip()
-        http_ver = random.choice(HTTP_VERSIONS)
-        ts = random_timestamp(ts, jitter_seconds=2)
-        lines.append(build_line(ts, ip, method, path, http_ver, status, size))
+        ts += datetime.timedelta(seconds=random.uniform(0.1, 0.4))  # ~0.2s entre requests
+        records.append(make_record(ts))
 
     with open(output_path, "w") as f:
-        f.write("\n".join(lines) + "\n")
+        for r in records:
+            f.write(json.dumps(r) + "\n")
 
-    # Resumen rápido
+    # Resumen
     from collections import Counter
-    status_counts = Counter()
-    for line in lines:
-        code = int(line.split('" ')[1].split()[0])
-        status_counts[code] += 1
+    level_counts  = Counter(r["level"]  for r in records)
+    status_counts = Counter(r["status"] for r in records)
+    error_counts  = Counter(r["error"]  for r in records if r["error"])
+    latencies     = [r["latency_ms"] for r in records]
+    latencies.sort()
+    p95 = latencies[int(len(latencies) * 0.95)]
+    p99 = latencies[int(len(latencies) * 0.99)]
 
-    print(f"✅  Generadas {n_lines} líneas en '{output_path}'")
-    print("\n📊  Distribución de status codes:")
-    for code in sorted(status_counts):
-        bar = "█" * (status_counts[code] * 40 // n_lines)
-        pct = status_counts[code] * 100 / n_lines
-        print(f"   {code}  {bar:<40} {status_counts[code]:>5}  ({pct:.1f}%)")
+    print(f"\u2705  Generadas {n_lines} líneas en '{output_path}'")
+    print(f"\n\ud83d\udcca  Niveles: " + "  ".join(f"{k}={v}" for k, v in sorted(level_counts.items())))
+    print(f"\ud83d\udcca  Status:  " + "  ".join(f"{k}={v}" for k, v in sorted(status_counts.items())))
+    if error_counts:
+        print(f"\ud83d\udd34  Errores: " + "  ".join(f"{k}={v}" for k, v in error_counts.most_common()))
+    print(f"\u23f1   Latencia: avg={sum(latencies)//len(latencies)}ms  p95={p95}ms  p99={p99}ms")
     fives = sum(v for k, v in status_counts.items() if str(k).startswith("5"))
-    print(f"\n🔴  Total errores 5xx: {fives} ({fives*100/n_lines:.1f}%)")
+    print(f"\ud83d\udfe1  Availability: {(n_lines - fives) * 100 / n_lines:.2f}%")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Genera access.log simulado para labs de scripting")
-    parser.add_argument("--lines", type=int, default=500, help="Número de líneas a generar (default: 500)")
-    parser.add_argument("--out", type=str, default="access.log", help="Archivo de salida (default: access.log)")
+    parser = argparse.ArgumentParser(description="Genera app.log JSON para labs de scripting/observabilidad")
+    parser.add_argument("--lines", type=int,  default=500,       help="Número de líneas (default: 500)")
+    parser.add_argument("--out",   type=str,  default="app.log", help="Archivo de salida (default: app.log)")
     args = parser.parse_args()
     generate(args.lines, args.out)

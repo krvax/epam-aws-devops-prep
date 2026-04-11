@@ -1,20 +1,25 @@
 # Lab: Scripting & Coding Prep
 
 > Ejercicios prácticos para la prueba de scripting de EPAM.  
-> Los logs simulados usan los mismos endpoints y patrones de error del **lab-07-monitoring** (Prometheus + Grafana en EKS).
+> Los logs JSON usan el mismo formato que el `loggen.sh` del **lab-09-cloudwatch-logs**,
+> y las métricas que reporta son equivalentes a las queries de **CloudWatch Logs Insights**
+> y a las de **Prometheus** del lab-07.
 
 ---
 
 ## Flujo
 
 ```
-lab-07 (Prometheus scrape HTTP metrics)
-         ↓
-    generate_logs.py   ← simula access.log realista con endpoints EKS
-         ↓
-    log_analyzer.py    ← ejercicio 1: parsea y reporta métricas (entrevista)
-         ↓
-    s3_janitor.py      ← ejercicio 2: boto3 + moto (próximamente)
+[lab-09] EC2 + loggen.sh ──► CloudWatch Log Group /epam/lab/app
+                 │
+                 ▼  (mismo formato JSON)
+         generate_logs.py   ◄── genera app.log local para practicar
+                 │
+                 ▼
+         log_analyzer.py    ◄── Ejercicio 1: parseo, métricas, SLO check
+                 │
+                 ▼
+         s3_janitor.py      ◄── Ejercicio 2: boto3 + moto (próximamente)
 ```
 
 ---
@@ -37,72 +42,74 @@ cd labs/scripting
 ### Paso 1: Genera el log
 
 ```bash
-# 500 líneas (default)
-python generate_logs.py
-
-# 2000 líneas para análisis más realista
-python generate_logs.py --lines 2000
-
-# Output personalizado
-python generate_logs.py --lines 1000 --out /tmp/test.log
+python generate_logs.py              # 500 líneas -> app.log
+python generate_logs.py --lines 2000 # más datos
+python generate_logs.py --out /tmp/app.log
 ```
 
-### Paso 2: Analiza el log
+### Paso 2: Analiza
 
 ```bash
-# Analiza access.log con SLO default (99.5%)
-python log_analyzer.py
-
-# SLO más estricto (99.9% — típico de producción)
-python log_analyzer.py --slo 99.9
-
-# Contra un log específico
-python log_analyzer.py --log /tmp/test.log --slo 99.9
+python log_analyzer.py               # SLO default 99.5%
+python log_analyzer.py --slo 99.9    # SLO estricto de producción
+python log_analyzer.py --log /tmp/app.log --slo 99.9
 ```
 
 ### Output esperado
 
 ```
-=======================================================
+==========================================================
   📋  LOG ANALYZER — EPAM Scripting Exercise
-=======================================================
-  Archivo analizado : access.log
-  Total de requests : 500
-  Errores 4xx       : 42
-  Errores 5xx       : 31
-  Error rate (5xx)  : 6.20%
-  Availability      : 93.800%
+==========================================================
+  Total requests : 2,000
+  INFO / WARN / ERROR : 1,700 / 160 / 140
 
   📊  Status code breakdown:
-     200  ██████████████████████         350
-     ...
+     200  ███████████████████████      1700
+     400  ███                160
+     500  ██                  140
+
+  ⏱   Latencia:
+     avg=312ms  p50=290ms  p95=1820ms  p99=2380ms
 
   🔴  Top endpoints con errores 5xx:
-     12x  POST /api/v1/payments
+     38x  POST /api/v1/payments
      ...
 
-  🚨  SLO 99.9% availability: VIOLADO — error budget agotado
-=======================================================
+  ✅  SLO 99.5% availability: CUMPLIDO
+==========================================================
 ```
 
 ---
 
-## Relación con lab-07-monitoring
+## Equivalencias con otros labs
 
-El reporte de `log_analyzer.py` es el equivalente en Python de esta query PromQL del lab-07:
+| Métrica de log_analyzer.py | CloudWatch Logs Insights (lab-09) | PromQL (lab-07) |
+|---|---|---|
+| Error rate 5xx | `filter status >= 500 \| stats count()` | `rate(http_requests_total{status=~"5.."}[5m])` |
+| p95 latencia | `stats pct(latency_ms, 95) by endpoint` | `histogram_quantile(0.95, rate(http_duration_bucket[5m]))` |
+| Top errores | `stats count() by error \| sort desc` | `topk(5, rate(errors_total[5m]))` |
 
-```promql
-# Error rate
-rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m])
+---
 
-# Availability (SLO check)
-1 - (
-  rate(http_requests_total{status=~"5.."}[5m]) /
-  rate(http_requests_total[5m])
-)
+## Ejercicios bonus con jq (bash)
+
+```bash
+# Top endpoints por requests
+jq -r '.endpoint' app.log | sort | uniq -c | sort -nr | head
+
+# Errores por tipo
+jq -r 'select(.error != "") | .error' app.log | sort | uniq -c | sort -nr
+
+# P95 de latencia sin numpy
+jq -r '.latency_ms' app.log | sort -n | awk 'BEGIN{c=0} {lines[c++]=$0} END{print lines[int(c*0.95)]}'
+
+# Requests de un usuario específico
+jq 'select(.user == "alice")' app.log | jq -s 'length'
+
+# Correlación: buscar request_id en el log
+jq 'select(.request_id == "<uuid-aqui>")' app.log
 ```
-
-En la entrevista puedes mencionar esta conexión — demuestra que entiendes el concepto de error rate más allá del código.
 
 ---
 
@@ -110,9 +117,7 @@ En la entrevista puedes mencionar esta conexión — demuestra que entiendes el 
 
 | Archivo | Descripción |
 |---|---|
-| `generate_logs.py` | Generador de `access.log` con endpoints reales de EKS |
-| `log_analyzer.py` | Ejercicio 1: análisis de logs con Python |
+| `generate_logs.py` | Genera `app.log` JSON — mismo formato que `loggen.sh` de lab-09 |
+| `log_analyzer.py` | Ejercicio 1: análisis completo con SLO check |
 | `s3_janitor.py` | Ejercicio 2: boto3 + moto (próximamente) |
-| `access.log` | Generado localmente — en `.gitignore` |
-
-> ⚠️ `access.log` no se commitea al repo. Agrégalo al `.gitignore` del repo raíz si no está.
+| `app.log` | Generado localmente — en `.gitignore` |
