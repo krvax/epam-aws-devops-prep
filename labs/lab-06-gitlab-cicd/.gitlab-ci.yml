@@ -1,0 +1,161 @@
+# =============================================================================
+# Lab 06 — GitLab CI/CD Pipeline: build → ECR → EKS
+# =============================================================================
+# Stages: validate → build → deploy → verify
+# Auth AWS: OIDC (sin access keys estáticas)
+# Requisitos en GitLab CI/CD Variables:
+#   AWS_ROLE_ARN, AWS_REGION, ECR_REGISTRY, ECR_REPO
+#   EKS_CLUSTER_NAME, K8S_NAMESPACE
+# =============================================================================
+
+stages:
+  - validate
+  - build
+  - deploy
+  - verify
+
+variables:
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+  KUBECTL_VERSION: "1.29.0"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ANCHOR: configuración de OIDC — reutilizable en todos los jobs que llamen AWS
+.aws_oidc: &aws_oidc
+  id_tokens:
+    AWS_OIDC_TOKEN:
+      aud: https://gitlab.com
+  before_script:
+    - |
+      # Obtener credenciales temporales de AWS via OIDC
+      CREDENTIALS=$(aws sts assume-role-with-web-identity \
+        --role-arn "$AWS_ROLE_ARN" \
+        --role-session-name "gitlab-ci-$CI_PIPELINE_ID" \
+        --web-identity-token "$AWS_OIDC_TOKEN" \
+        --duration-seconds 3600 \
+        --query 'Credentials' \
+        --output json)
+      export AWS_ACCESS_KEY_ID=$(echo $CREDENTIALS | python3 -c "import sys,json; print(json.load(sys.stdin)['AccessKeyId'])")
+      export AWS_SECRET_ACCESS_KEY=$(echo $CREDENTIALS | python3 -c "import sys,json; print(json.load(sys.stdin)['SecretAccessKey'])")
+      export AWS_SESSION_TOKEN=$(echo $CREDENTIALS | python3 -c "import sys,json; print(json.load(sys.stdin)['SessionToken'])")
+      echo "AWS credentials configured via OIDC"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 1: validate
+validate:dockerfile:
+  stage: validate
+  image: hadolint/hadolint:latest-debian
+  script:
+    - hadolint Dockerfile
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+validate:terraform:
+  stage: validate
+  image:
+    name: hashicorp/terraform:1.10
+    entrypoint: [""]
+  script:
+    - cd terraform/
+    - terraform fmt -check
+    - terraform init -backend=false
+    - terraform validate
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    changes:
+      - terraform/**/*
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 2: build
+build:docker:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  <<: *aws_oidc
+  script:
+    - |
+      # Login a ECR
+      aws ecr get-login-password --region $AWS_REGION | \
+        docker login --username AWS --password-stdin $ECR_REGISTRY
+
+      # Build imagen con commit SHA como tag (nunca :latest en prod)
+      docker build \
+        --tag $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG \
+        --tag $ECR_REGISTRY/$ECR_REPO:latest \
+        --label "git-commit=$CI_COMMIT_SHA" \
+        --label "pipeline-id=$CI_PIPELINE_ID" \
+        .
+
+      # Push ambos tags
+      docker push $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
+      docker push $ECR_REGISTRY/$ECR_REPO:latest
+
+      echo "IMAGE_TAG=$IMAGE_TAG" >> build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 3: deploy
+deploy:eks:
+  stage: deploy
+  image:
+    name: bitnami/kubectl:$KUBECTL_VERSION
+    entrypoint: [""]
+  <<: *aws_oidc
+  script:
+    - |
+      # Configurar kubeconfig apuntando al cluster EKS
+      aws eks update-kubeconfig \
+        --name $EKS_CLUSTER_NAME \
+        --region $AWS_REGION
+
+      # Actualizar imagen del deployment con el nuevo tag
+      kubectl set image deployment/app \
+        app=$ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG \
+        -n $K8S_NAMESPACE
+
+      echo "Deployed image: $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG"
+  environment:
+    name: production
+    url: https://app.example.com
+  needs:
+    - job: build:docker
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 4: verify con rollback automático si falla
+verify:health:
+  stage: verify
+  image:
+    name: bitnami/kubectl:$KUBECTL_VERSION
+    entrypoint: [""]
+  <<: *aws_oidc
+  script:
+    - |
+      aws eks update-kubeconfig \
+        --name $EKS_CLUSTER_NAME \
+        --region $AWS_REGION
+
+      # Esperar hasta 5 minutos que el rollout complete
+      if ! kubectl rollout status deployment/app \
+        -n $K8S_NAMESPACE \
+        --timeout=300s; then
+
+        echo "Rollout failed. Executing automatic rollback..."
+        kubectl rollout undo deployment/app -n $K8S_NAMESPACE
+        kubectl rollout status deployment/app -n $K8S_NAMESPACE --timeout=120s
+        exit 1  # Falla el pipeline para que GitLab notifique
+      fi
+
+      echo "Deploy successful. Image: $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG"
+  needs:
+    - job: deploy:eks
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
