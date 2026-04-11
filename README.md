@@ -738,10 +738,10 @@ SRE:
 | [lab-02-iam](./labs/lab-02-iam/) | IAM Roles, Policies, Assume Role | ✅ Terraform |
 | [lab-03-asg-alb](./labs/lab-03-asg-alb/) | Auto Scaling Group + Application Load Balancer | ✅ Terraform |
 | [lab-04-eks-cluster](./labs/lab-04-eks-cluster/) | EKS Cluster + Managed Node Group + IRSA + LBC | ✅ Terraform |
-| lab-05-remote-state | S3 backend + DynamoDB locking + bootstrap | 🔜 Pendiente |
-| lab-06-gitlab-cicd | Pipeline GitLab CI → ECR → EKS con OIDC | 🔜 Pendiente |
-| lab-07-monitoring | Prometheus + Grafana en EKS con Helm | 🔜 Pendiente |
-| lab-08-secrets-manager | Secrets Store CSI Driver + Secrets Manager en EKS | 🔜 Pendiente |
+| [lab-05-remote-state](./labs/lab-05-remote-state/) | S3 backend + use_lockfile (sin DynamoDB) | ✅ Readme |
+| [lab-06-gitlab-cicd](./labs/lab-06-gitlab-cicd/) | Pipeline GitLab CI → ECR → EKS con OIDC | ✅ Readme |
+| [lab-07-monitoring](./labs/lab-07-monitoring/) | Prometheus + Grafana en EKS con Helm | ✅ Readme |
+| [lab-08-secrets-manager](./labs/lab-08-secrets-manager/) | Secrets Store CSI Driver + Secrets Manager en EKS | ✅ Readme |
 | lab-09-librechat-ec2 | LibreChat + Docker Compose + Bedrock via IAM Role | 🔜 Pendiente |
 
 ---
