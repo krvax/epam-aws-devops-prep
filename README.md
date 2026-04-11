@@ -290,7 +290,7 @@ module "eks" {
 ### Temas a dominar
 
 - [ ] **AWS CodePipeline / CodeBuild / CodeDeploy**: stages, artifacts, buildspec.yml
-- [ ] **GitHub Actions**: workflows, jobs, steps, secrets, environments, reusable workflows
+- [ ] **GitLab CI/CD**: `.gitlab-ci.yml`, stages, jobs, variables, environments, runners, artifacts
 - [ ] **Jenkins**: Jenkinsfile, declarative vs scripted, agentes, plugins
 - [ ] **GitOps**: ArgoCD o Flux — concepto, ventajas vs CI tradicional
 - [ ] **Estrategias de deployment**: Blue/Green, Canary, Rolling Update
@@ -298,46 +298,94 @@ module "eks" {
 
 ### 🧪 Labs
 
-#### Lab 4.1 — Pipeline CI/CD con GitHub Actions + EKS
+#### Lab 4.1 — Pipeline CI/CD con GitLab CI + EKS
 ```yaml
-# .github/workflows/deploy.yml
-name: Deploy to EKS
+# .gitlab-ci.yml
+stages:
+  - build
+  - push
+  - deploy
 
-on:
-  push:
-    branches: [main]
+variables:
+  AWS_REGION: us-east-1
+  ECR_REPO: my-app
+  EKS_CLUSTER: epam-prep
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+.aws_auth: &aws_auth
+  before_script:
+    - aws configure set region $AWS_REGION
+    - aws ecr get-login-password | docker login --username AWS --password-stdin $ECR_REGISTRY
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
+build:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  <<: *aws_auth
+  script:
+    - docker build -t $ECR_REGISTRY/$ECR_REPO:$CI_COMMIT_SHA .
+  only:
+    - main
 
-      - name: Login to ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+push:
+  stage: push
+  image: docker:24
+  services:
+    - docker:24-dind
+  <<: *aws_auth
+  script:
+    - docker push $ECR_REGISTRY/$ECR_REPO:$CI_COMMIT_SHA
+    - docker tag $ECR_REGISTRY/$ECR_REPO:$CI_COMMIT_SHA $ECR_REGISTRY/$ECR_REPO:latest
+    - docker push $ECR_REGISTRY/$ECR_REPO:latest
+  only:
+    - main
 
-      - name: Build & Push Docker image
-        run: |
-          IMAGE_TAG=${{ github.sha }}
-          docker build -t $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
+deploy:
+  stage: deploy
+  image: alpine/k8s:1.30.0
+  script:
+    - aws eks update-kubeconfig --name $EKS_CLUSTER --region $AWS_REGION
+    - kubectl set image deployment/app app=$ECR_REGISTRY/$ECR_REPO:$CI_COMMIT_SHA
+    - kubectl rollout status deployment/app --timeout=120s
+  environment:
+    name: production
+  only:
+    - main
 
-      - name: Deploy to EKS
-        run: |
-          aws eks update-kubeconfig --name epam-prep --region us-east-1
-          kubectl set image deployment/app app=$ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
+# Variables a configurar en GitLab → Settings → CI/CD → Variables:
+# AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (o usar GitLab OIDC con IAM Role)
+# ECR_REGISTRY: <account_id>.dkr.ecr.us-east-1.amazonaws.com
 
-# Pregunta: "¿Cómo haces rollback automático si el deployment falla?"
+# Pregunta: "¿Cómo haces rollback automático si kubectl rollout status falla?"
 ```
 
-#### Lab 4.2 — Blue/Green Deployment en EKS
+#### Lab 4.2 — GitLab CI con OIDC (sin access keys estáticas)
+```yaml
+# Uso de OIDC para autenticarse con AWS sin AWS_ACCESS_KEY_ID
+# Requiere configurar un IAM Identity Provider en AWS para GitLab
+
+deploy_oidc:
+  stage: deploy
+  image: amazon/aws-cli:latest
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.com
+  script:
+    - >
+      export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s"
+      $(aws sts assume-role-with-web-identity
+      --role-arn $AWS_ROLE_ARN
+      --role-session-name gitlab-cicd
+      --web-identity-token $GITLAB_OIDC_TOKEN
+      --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]'
+      --output text))
+    - aws eks update-kubeconfig --name $EKS_CLUSTER --region $AWS_REGION
+    - kubectl rollout status deployment/app
+
+# Pregunta: "¿Qué ventaja tiene OIDC sobre access keys en un runner de GitLab?"
+```
+
+#### Lab 4.3 — Blue/Green Deployment en EKS
 ```
 Objetivo: Implementar Blue/Green usando dos Deployments y cambiar el selector del Service.
 
@@ -630,6 +678,12 @@ Terraform:
 - ¿Cómo evitas duplicar código entre entornos?
 - ¿Qué pasa si alguien modifica un recurso manualmente en AWS?
 
+CI/CD (GitLab):
+- ¿Cuál es la diferencia entre un GitLab Runner shared vs specific?
+- ¿Cómo proteges secrets en un pipeline de GitLab?
+- ¿Qué es GitLab OIDC y por qué es mejor que access keys estáticas?
+- ¿Cómo implementas ambientes protegidos (protected environments) en GitLab?
+
 SRE:
 - ¿Cómo defines qué SLO poner a un servicio nuevo?
 - ¿Qué haces cuando el error budget se agota?
@@ -650,6 +704,7 @@ SRE:
 | killer.sh | killer.sh | Simulador CKA/CKAD |
 | HashiCorp Learn | developer.hashicorp.com/terraform/tutorials | Terraform |
 | AWS Skill Builder (free tier) | skillbuilder.aws | Cursos AWS oficiales |
+| GitLab CI/CD Docs | docs.gitlab.com/ee/ci | Referencia oficial GitLab CI |
 
 ### 🎓 Certificaciones recomendadas (en orden)
 
@@ -664,7 +719,7 @@ SRE:
 |--------|---------|------|
 | 1 | AWS Core (Bloque 1) | Labs VPC, IAM, ASG |
 | 2 | Kubernetes / EKS (Bloque 2) | Cluster funcionando, troubleshooting |
-| 3 | Terraform + CI/CD (Bloques 3-4) | Pipeline end-to-end |
+| 3 | Terraform + CI/CD (Bloques 3-4) | Pipeline GitLab → ECR → EKS |
 | 4 | Observabilidad (Bloque 5) | Dashboards + alertas |
 | 5 | SRE + Seguridad (Bloques 6 + 8) | SLOs definidos, secrets en K8s |
 | 6 | Linux + Mock interviews (Bloques 7 + 10) | Practicar respuestas en inglés |
@@ -677,11 +732,17 @@ SRE:
 
 ## 12. Labs prácticos
 
-| Lab | Descripción | Terraform |
-|-----|-------------|-----------|
-| [lab-01-vpc](./labs/lab-01-vpc/) | VPC con subnets públicas/privadas, IGW, NAT GW | ✅ |
-| [lab-02-iam](./labs/lab-02-iam/) | IAM Roles, Policies, Assume Role | ✅ |
-| [lab-03-asg-alb](./labs/lab-03-asg-alb/) | Auto Scaling Group + Application Load Balancer | ✅ |
+| Lab | Descripción | Archivos |
+|-----|-------------|----------|
+| [lab-01-vpc](./labs/lab-01-vpc/) | VPC con subnets públicas/privadas, IGW, NAT GW | ✅ Terraform |
+| [lab-02-iam](./labs/lab-02-iam/) | IAM Roles, Policies, Assume Role | ✅ Terraform |
+| [lab-03-asg-alb](./labs/lab-03-asg-alb/) | Auto Scaling Group + Application Load Balancer | ✅ Terraform |
+| [lab-04-eks-cluster](./labs/lab-04-eks-cluster/) | EKS Cluster + Managed Node Group + IRSA + LBC | ✅ Terraform |
+| lab-05-remote-state | S3 backend + DynamoDB locking + bootstrap | 🔜 Pendiente |
+| lab-06-gitlab-cicd | Pipeline GitLab CI → ECR → EKS con OIDC | 🔜 Pendiente |
+| lab-07-monitoring | Prometheus + Grafana en EKS con Helm | 🔜 Pendiente |
+| lab-08-secrets-manager | Secrets Store CSI Driver + Secrets Manager en EKS | 🔜 Pendiente |
+| lab-09-librechat-ec2 | LibreChat + Docker Compose + Bedrock via IAM Role | 🔜 Pendiente |
 
 ---
 
