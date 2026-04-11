@@ -1,0 +1,290 @@
+# ============================================
+# PROJECT: LibreChat on AWS — EC2 → ECS Fargate
+# ROLE: DevOps / Cloud Engineer (EPAM Interview Prep)
+# ============================================
+
+## Project Overview
+This project deploys LibreChat (open-source AI chat platform) on AWS using a
+progressive path: EC2 + Docker Compose for learning, ECS Fargate for production.
+It demonstrates DevOps/Cloud Engineering best practices as a portfolio project
+for an EPAM Cloud/DevOps Engineer interview.
+
+The goal is NOT to over-engineer with EKS from day one. The goal is to show
+pragmatic decision-making: right tool for the right stage.
+
+## Deployment Stages
+
+### Stage 1 — EC2 + Docker Compose (Learning / Lab)
+- Single EC2 t3.medium (Ubuntu 22.04)
+- LibreChat + MongoDB + Meilisearch via Docker Compose
+- Access via SSM Session Manager (no SSH open)
+- Bedrock via IAM Instance Profile (no static keys)
+- Goal: understand LibreChat internals, validate config, iterate fast
+
+### Stage 2 — ECS Fargate (Production)
+- LibreChat container → ECS Fargate service
+- MongoDB → DocumentDB or MongoDB Atlas
+- Redis → ElastiCache (sessions, rate limiting)
+- Search → Meilisearch on ECS or OpenSearch
+- ALB + ACM + Route53 → HTTPS with custom domain
+- EFS → shared file storage for multi-task setup
+- Secrets → AWS Secrets Manager (no .env files)
+- CI/CD → GitHub Actions (validate → plan → deploy)
+
+## Architecture Stack
+
+### Stage 1 (EC2)
+- IaC: Terraform (~> 5.0 AWS provider)
+- Compute: EC2 t3.medium
+- Compose: Docker Compose v2 (deploy-compose.yml from LibreChat repo)
+- AI Backend: AWS Bedrock (Claude 3.5 Haiku, Claude 3 Sonnet)
+- Auth: IAM Instance Profile with bedrock:InvokeModel
+- Access: SSM Session Manager (no port 22)
+
+### Stage 2 (ECS)
+- IaC: Terraform with terraform-aws-modules (vpc, ecs, alb)
+- Compute: ECS Fargate (serverless containers)
+- Database: DocumentDB 5.0 or MongoDB Atlas (M10+)
+- Cache: ElastiCache Redis 7 (cluster mode off, TLS)
+- Storage: EFS for persistent file mounts
+- Load Balancer: ALB + HTTPS + WAF (optional)
+- Secrets: AWS Secrets Manager (no env files, no hardcoded values)
+- AI Backend: AWS Bedrock via task IAM Role (IRSA-equivalent on ECS)
+- CI/CD: GitHub Actions
+- Monitoring: CloudWatch Container Insights + Logs
+
+## Project Structure
+```
+librechat-aws/
+├── terraform/
+│   ├── stage1-ec2/          # VPC + EC2 + IAM (lab)
+│   │   ├── main.tf
+│   │   ├── iam.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── userdata.sh
+│   └── stage2-ecs/          # Full ECS production stack
+│       ├── main.tf          # VPC, ECS cluster
+│       ├── ecs.tf           # Task definition, service
+│       ├── alb.tf           # ALB, target groups, listeners
+│       ├── rds.tf           # DocumentDB or RDS
+│       ├── elasticache.tf   # Redis
+│       ├── efs.tf           # Shared storage
+│       ├── iam.tf           # Task role + execution role
+│       ├── secrets.tf       # Secrets Manager resources
+│       ├── dns.tf           # Route53 + ACM
+│       ├── variables.tf
+│       ├── outputs.tf
+│       └── terraform.tfvars.example
+├── docker/
+│   └── librechat/
+│       └── librechat.yaml   # LibreChat config (Bedrock endpoint)
+├── scripts/
+│   ├── bootstrap.sh         # EC2 userdata helper
+│   ├── health-check.sh      # Post-deploy validation
+│   └── rotate-secrets.sh    # Secret rotation helper
+├── .github/
+│   └── workflows/
+│       ├── validate.yml     # terraform fmt + validate + tfsec
+│       └── deploy.yml       # plan + apply on merge to main
+├── docs/
+│   ├── architecture.md
+│   ├── stage1-ec2-guide.md
+│   ├── stage2-ecs-guide.md
+│   └── bedrock-setup.md
+├── .cursorrules             # this file
+├── .cursorignore
+├── .editorconfig
+├── Makefile
+└── README.md
+```
+
+## Coding Standards & Conventions
+
+### Terraform
+- Use official terraform-aws-modules (vpc, ecs, alb, security-group) when available
+- Remote state: S3 backend + DynamoDB locking (always, even in lab)
+- Variables must have description and type — no naked variables
+- Use locals{} for computed values, not repeated expressions
+- Tag ALL resources:
+  ```hcl
+  tags = {
+    Project     = var.project_name
+    Environment = var.environment
+    Stage       = "ec2" | "ecs"
+    ManagedBy   = "terraform"
+    Owner       = "miguel-carvajal"
+  }
+  ```
+- Sensitive values go to Secrets Manager — NEVER in .tfvars or code
+- Run terraform fmt and terraform validate before every commit
+- Pin all provider and module versions
+- Outputs for every value consumed cross-module or post-deploy
+
+### Bash Scripts
+- Always: `#!/bin/bash` + `set -euo pipefail`
+- Functions for reusable logic — no flat long scripts
+- Timestamps in logs: `echo "[$(date '+%Y-%m-%d %H:%M:%S')] message"`
+- `trap` for cleanup on EXIT/ERR
+- Validate required args/env vars at top before any logic
+- ShellCheck-compliant syntax
+- Exit codes: 0=success, 1=general error, 2=misuse/bad args
+
+### Docker / Compose
+- Pin image tags — never :latest in any environment
+- Non-root user in custom Dockerfiles
+- HEALTHCHECK instruction on custom images
+- Use .dockerignore on any custom build context
+- Multi-stage builds for any custom image
+
+### GitHub Actions
+- Pin action versions to SHA or @v4 — never @latest
+- Job order: validate → plan → apply
+- GitHub Environments with manual approval for production
+- Never echo secrets — use masks
+- Cache: terraform providers, dependencies
+- Post-deploy health check with auto-rollback on failure
+
+## Security Requirements (EPAM-level answers)
+- No secrets in code, manifests, .env files, or tfvars
+- Static keys NEVER on EC2 — always Instance Profile
+- Static keys NEVER in ECS tasks — always Task IAM Role
+- All data encrypted at rest: EBS gp3, EFS, ElastiCache, DocumentDB
+- TLS in transit: ALB (HTTPS), Redis TLS, DocumentDB TLS
+- Security Groups: least privilege — only necessary ports, no 0.0.0.0/0 on :22
+- SSM for EC2 access — SSH port never open
+- Bedrock access via IAM (no Bedrock API keys)
+- tfsec / checkov scan in CI pipeline
+- Trivy for container image scanning
+
+## IAM Design (Key EPAM Interview Topic)
+
+### Stage 1 — EC2 Instance Profile
+```
+EC2 Instance
+  └── Instance Profile
+        └── IAM Role
+              ├── bedrock:InvokeModel (on foundation-model/*)
+              ├── bedrock:InvokeModelWithResponseStream
+              └── AmazonSSMManagedInstanceCore (managed policy)
+```
+No ACCESS_KEY_ID, no SECRET_ACCESS_KEY anywhere.
+SDK auto-discovers credentials via Instance Metadata Service (IMDS).
+
+### Stage 2 — ECS Task Role
+```
+ECS Task
+  └── Task IAM Role (taskRoleArn)
+        ├── bedrock:InvokeModel
+        ├── bedrock:InvokeModelWithResponseStream
+        ├── secretsmanager:GetSecretValue (scoped to project secrets)
+        └── (no SSM needed — Fargate has no EC2 underneath)
+
+ECS Execution Role (executionRoleArn) — separate from task role
+  ├── AmazonECSTaskExecutionRolePolicy (managed)
+  ├── secretsmanager:GetSecretValue (for ECS to inject secrets at startup)
+  └── logs:CreateLogGroup, logs:PutLogEvents
+```
+
+## Bedrock Configuration
+
+### Stage 1 (.env on EC2)
+```bash
+# Region only — no keys needed (Instance Profile handles auth)
+BEDROCK_AWS_DEFAULT_REGION=us-east-1
+```
+
+### Stage 2 (librechat.yaml in ECS)
+```yaml
+version: 1.1.5
+cache: true
+endpoints:
+  bedrock:
+    titleModel: "anthropic.claude-3-5-haiku-20241022-v1:0"
+    availableModels:
+      - anthropic.claude-3-5-haiku-20241022-v1:0
+      - anthropic.claude-3-sonnet-20240229-v1:0
+      - meta.llama3-70b-instruct-v1:0
+```
+No AWS credentials in the config — Task Role handles auth automatically.
+
+## Key Design Decisions (Prepare to defend these in EPAM interview)
+
+1. **EC2 first, ECS second (not EKS)**
+   EKS adds ~$0.10/hr for the control plane plus node management overhead.
+   For a single application, ECS Fargate is simpler, cheaper, and fully managed.
+   EKS makes sense when co-locating many services or needing K8s-specific features.
+
+2. **DocumentDB over self-managed MongoDB on ECS**
+   LibreChat is compatible with DocumentDB 5.0 (MongoDB wire protocol).
+   Managed backups, Multi-AZ, automated patching. No StatefulSet headaches.
+   Trade-off: not 100% MongoDB API compatible — validate feature parity first.
+
+3. **ElastiCache over Redis container**
+   Production reliability, automatic failover, encryption at rest/transit.
+   No ops burden for Redis upgrades or data persistence management.
+
+4. **Bedrock over OpenAI API**
+   No third-party API key to manage. Native AWS IAM controls access.
+   Stays within AWS network — no data leaving your VPC.
+   Cost model per-token with no monthly minimums.
+
+5. **Secrets Manager over .env files**
+   Single source of truth. Automatic rotation capability.
+   ECS can inject secrets at container startup via `secrets:` block.
+   Audit trail in CloudTrail for every secret access.
+
+6. **SSM over SSH (Stage 1)**
+   No inbound port 22 on Security Group — reduced attack surface.
+   Session logging to CloudWatch. IAM-controlled access.
+   No key pair management.
+
+7. **ALB over NLB (Stage 2)**
+   HTTP/HTTPS termination with ACM certificates (free).
+   Host/path-based routing. WAF integration. Health checks at HTTP level.
+   Native ECS service discovery integration.
+
+## Common Commands Reference
+```bash
+# ── TERRAFORM ──────────────────────────────────────────
+cd terraform/stage1-ec2 && terraform init && terraform plan
+cd terraform/stage2-ecs && terraform init && terraform plan
+
+# ── EC2 ACCESS (Stage 1) ───────────────────────────────
+aws ssm start-session --target $(terraform output -raw instance_id)
+sudo tail -f /var/log/librechat-setup.log
+docker ps && docker logs LibreChat -f
+
+# ── ECS (Stage 2) ──────────────────────────────────────
+aws ecs list-tasks --cluster librechat-cluster
+aws ecs execute-command --cluster librechat-cluster   --task <task-id> --container librechat   --interactive --command "/bin/sh"
+
+# ── BEDROCK VALIDATION ─────────────────────────────────
+aws bedrock list-foundation-models   --query 'modelSummaries[?contains(modelId,`claude`)].modelId'
+
+# ── SECRETS ────────────────────────────────────────────
+aws secretsmanager get-secret-value --secret-id librechat/prod/mongo-uri
+```
+
+## When Generating Code
+- Always production-ready and complete — no TODOs or stubs
+- Prefer readability over cleverness
+- Comment WHY, not WHAT
+- Consider: idempotency, error handling, logging, security in every file
+- Follow the stage (EC2 vs ECS) — don't mix patterns
+- When generating Terraform: show variable dependencies and outputs
+- When generating IAM: always least privilege — scope resources specifically
+- When modifying ECS task definitions: consider zero-downtime deployment impact
+- Suggest CloudWatch alarms for every new AWS resource created
+
+## EPAM Interview Context
+This project demonstrates end-to-end ownership of a real production workload on AWS.
+Be ready to explain:
+- Why EC2 → ECS progression (not jumping straight to EKS)
+- Every IAM decision: Instance Profile vs Task Role vs IRSA
+- Cost breakdown per stage
+- How secrets flow from Secrets Manager into the application
+- Disaster recovery: what happens if an AZ goes down in Stage 2
+- How CI/CD pipeline handles a failed deployment (rollback strategy)
+- Security posture: what an attacker would need to compromise this setup
+- How you'd add observability (CloudWatch Container Insights, X-Ray tracing)
