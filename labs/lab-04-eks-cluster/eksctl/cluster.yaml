@@ -1,0 +1,64 @@
+# eksctl ClusterConfig — definición declarativa del cluster
+# Ref: https://eksctl.io/usage/schema/
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: epam-prep
+  region: us-east-1
+  version: "1.29"
+  tags:
+    Project: epam-aws-devops-prep
+    ManagedBy: eksctl
+    Owner: miguel-carvajal
+    Lab: lab-04-eks-cluster
+
+# eksctl crea una VPC nueva con subnets en 2 AZs por defecto
+availabilityZones:
+  - us-east-1a
+  - us-east-1b
+
+iam:
+  # OIDC Provider — requerido para IRSA (Lab 2.2)
+  # Sin esto, los pods no pueden asumir IAM Roles
+  withOIDC: true
+
+managedNodeGroups:
+  - name: standard-workers
+    instanceType: t3.medium
+    minSize: 1
+    maxSize: 3
+    desiredCapacity: 2
+    # Nodos en subnets privadas (best practice — no expuestos directamente)
+    privateNetworking: true
+    volumeEncrypted: true
+    volumeSize: 20
+    labels:
+      role: worker
+      environment: lab
+    tags:
+      NodeGroup: standard-workers
+    iam:
+      attachPolicyARNs:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        # SSM — acceso sin SSH key al nodo (mismo patrón lab-01)
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+# Add-ons gestionados por AWS
+addons:
+  - name: vpc-cni
+    version: latest
+  - name: coredns
+    version: latest
+  - name: kube-proxy
+    version: latest
+
+# CloudWatch Logs — solo los esenciales para el lab
+cloudWatch:
+  clusterLogging:
+    enableTypes:
+      - api
+      - audit
+      - authenticator
