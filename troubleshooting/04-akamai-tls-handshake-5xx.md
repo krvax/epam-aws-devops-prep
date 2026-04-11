@@ -6,7 +6,7 @@ Usuarios y un third party recibían 5xx al intentar acceder a contenido
 servido por AEM/Konector detrás de Akamai CDN. La causa fue una rotación
 de certificado donde el origin ya presentaba el cert nuevo pero el
 certificate pinning en la Akamai Property todavía apuntaba al cert viejo.
-Resolvió el incidente durante on-call actualizando el pin en Akamai
+Resolví el incidente durante on-call actualizando el pin en Akamai
 Property Manager para incluir ambos certificados (viejo y nuevo).
 
 ## Contexto
@@ -27,7 +27,7 @@ Property Manager para incluir ambos certificados (viejo y nuevo).
 
 ## Qué es certificate pinning en Akamai
 En Akamai Property Manager se puede configurar que la conexión al
-origen solo se establezca si el certificado TLS presentado coincide
+origin solo se establezca si el certificado TLS presentado coincide
 con un fingerprint (pin) previamente configurado. Esto previene
 ataques MITM pero introduce un punto de fallo si el certificado
 del origin cambia sin actualizar el pin.
@@ -292,7 +292,3 @@ Usuario/3rd party → Akamai CDN → Property (pin=certA + certB)
                                       ↓ TLS handshake
                                  Origin AEM/Konector [certB] ✅
 ```
-
-## Tags
-
-`akamai` `tls` `ssl` `certificate-pinning` `handshake` `5xx` `cdn` `edge` `domain-management` `t-mobile` `sre` `on-call` `post-mortem`
