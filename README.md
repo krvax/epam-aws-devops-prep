@@ -18,6 +18,8 @@
 9. [Bloque 8 — Seguridad en AWS](#9-bloque-8--seguridad-en-aws)
 10. [Preguntas frecuentes de entrevista EPAM](#10-preguntas-frecuentes-de-entrevista-epam)
 11. [Recursos & Certificaciones](#11-recursos--certificaciones)
+12. [Labs prácticos](#12-labs-prácticos)
+13. [Troubleshooting & Incident Reviews](#13-troubleshooting--incident-reviews)
 
 ---
 
@@ -252,7 +254,7 @@ envs/
   prod/
     main.tf   ← llama al módulo con var prod
 
-Pregunta: "¿Cómo versioinas módulos de Terraform en un equipo?"
+Pregunta: "¿Cómo versionas módulos de Terraform en un equipo?"
 ```
 
 #### Lab 3.3 — EKS con Terraform
@@ -604,7 +606,7 @@ spec:
    → kubectl rollout status deployment/app
    → Revisar por qué falló antes de re-deployar
 
-4. "¿Cómo mejorarías la resiliencia de este sistema?" 
+4. "¿Cómo mejorarías la resiliencia de este sistema?"
    → Multi-AZ, health checks, circuit breakers, retry logic, graceful degradation
 ```
 
@@ -670,3 +672,26 @@ SRE:
 ---
 
 > 💡 **Tip final**: En la entrevista EPAM, si no sabes algo, no lo inventes. Di: *"I haven't worked with that specific tool, but I'm familiar with the concept and I've used X which solves a similar problem."* Eso demuestra honestidad y capacidad de aprendizaje, que EPAM valora mucho.
+
+---
+
+## 12. Labs prácticos
+
+| Lab | Descripción | Terraform |
+|-----|-------------|-----------|
+| [lab-01-vpc](./labs/lab-01-vpc/) | VPC con subnets públicas/privadas, IGW, NAT GW | ✅ |
+| [lab-02-iam](./labs/lab-02-iam/) | IAM Roles, Policies, Assume Role | ✅ |
+| [lab-03-asg-alb](./labs/lab-03-asg-alb/) | Auto Scaling Group + Application Load Balancer | ✅ |
+
+---
+
+## 13. Troubleshooting & Incident Reviews
+
+Runbooks y post-mortems basados en incidentes reales en EKS.
+Cada documento incluye diagnóstico paso a paso y formato STAR para entrevista.
+
+| Documento | Tipo | Descripción |
+|-----------|------|-------------|
+| [01-librechat-ingress](./troubleshooting/01-librechat-ingress.md) | Runbook | Ingress no genera ALB — annotations ausentes en `values.yaml` |
+| [02-jwt-dst-incident](./troubleshooting/02-jwt-dst-incident.md) | Post-mortem | `TokenExpiredError` por timezone mismatch en cambio DST |
+| [03-eks-target-group-unhealthy](./troubleshooting/03-eks-target-group-unhealthy.md) | Runbook | ALB existe pero Target Group muestra targets `unhealthy` |
