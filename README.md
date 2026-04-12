@@ -50,7 +50,9 @@
 
 ### 🧪 Labs
 
-#### Lab 1.1 — VPC desde cero
+> **Carpetas en el repo:** [lab-01-vpc](./labs/lab-01-vpc/Readme.md) · [lab-02-iam](./labs/lab-02-iam/Readme.md) · [lab-03-asg-alb](./labs/lab-03-asg-alb/Readme.md) · Índice completo: [§12 Labs prácticos](#12-labs-prácticos).
+
+#### [Lab 1.1 — VPC desde cero](./labs/lab-01-vpc/Readme.md)
 ```
 Objetivo: Crear una VPC con subnets públicas y privadas, NAT Gateway, y verificar conectividad.
 
@@ -65,7 +67,7 @@ Pasos:
 Pregunta de entrevista: "¿Cuál es la diferencia entre Security Group y NACL?"
 ```
 
-#### Lab 1.2 — IAM Roles y Assume Role
+#### [Lab 1.2 — IAM Roles y Assume Role](./labs/lab-02-iam/Readme.md)
 ```
 Objetivo: Crear un rol cross-account y asumir el rol desde otra cuenta/servicio.
 
@@ -78,7 +80,7 @@ Pasos:
 Pregunta de entrevista: "¿Cómo das acceso a una EC2 a S3 sin usar access keys?"
 ```
 
-#### Lab 1.3 — Auto Scaling Group con ALB
+#### [Lab 1.3 — Auto Scaling Group con ALB](./labs/lab-03-asg-alb/Readme.md)
 ```
 Objetivo: Configurar ASG que escale basado en CPU y distribuya tráfico con ALB.
 
@@ -110,7 +112,9 @@ Pregunta de entrevista: "¿Cuál es la diferencia entre Scale In y Scale Out pol
 
 ### 🧪 Labs
 
-#### Lab 2.1 — Cluster EKS con eksctl
+> **Carpeta principal:** [lab-04-eks-cluster](./labs/lab-04-eks-cluster/Readme.md). Los Labs 2.2–2.4 (IRSA, troubleshooting, NetworkPolicy) se practican sobre ese cluster; el Readme del lab enlaza OIDC/IRSA y escenarios de diagnóstico.
+
+#### [Lab 2.1 — Cluster EKS con eksctl](./labs/lab-04-eks-cluster/Readme.md)
 ```bash
 # Objetivo: Crear cluster EKS básico y desplegar aplicación
 
@@ -134,7 +138,7 @@ kubectl expose deployment nginx --port=80 --type=LoadBalancer
 # Pregunta: "¿Qué es IRSA y por qué es mejor que usar access keys en pods?"
 ```
 
-#### Lab 2.2 — IRSA (IAM Roles for Service Accounts)
+#### [Lab 2.2 — IRSA (IAM Roles for Service Accounts)](./labs/lab-04-eks-cluster/Readme.md)
 ```bash
 # Objetivo: Dar acceso a un pod a S3 sin access keys
 
@@ -156,7 +160,7 @@ eksctl create iamserviceaccount \
 # Pregunta: "¿Cuál es la diferencia entre usar kube2iam vs IRSA?"
 ```
 
-#### Lab 2.3 — Troubleshooting de pods
+#### [Lab 2.3 — Troubleshooting de pods](./labs/lab-04-eks-cluster/Readme.md)
 ```bash
 # Escenarios a practicar:
 
@@ -176,7 +180,7 @@ kubectl describe node <node> | grep -A10 "Allocated resources"
 # Pregunta: "Un pod está en Pending desde hace 10 minutos. ¿Cómo lo diagnosticas?"
 ```
 
-#### Lab 2.4 — Network Policies
+#### [Lab 2.4 — Network Policies](./labs/lab-04-eks-cluster/Readme.md)
 ```yaml
 # Objetivo: Aislar un namespace para que solo acepte tráfico interno
 
@@ -214,7 +218,9 @@ spec:
 
 ### 🧪 Labs
 
-#### Lab 3.1 — Remote State con S3 y DynamoDB
+> **Carpetas:** [lab-05-remote-state](./labs/lab-05-remote-state/Readme.md) (remote state) · [lab-01-vpc/terraform](./labs/lab-01-vpc/terraform/README.md) (VPC con Terraform) · [lab-04-eks-cluster](./labs/lab-04-eks-cluster/) (EKS/IaC).
+
+#### [Lab 3.1 — Remote State con S3 y DynamoDB](./labs/lab-05-remote-state/Readme.md)
 ```hcl
 # backend.tf
 terraform {
@@ -238,7 +244,7 @@ terraform {
 # Pregunta: "¿Qué pasa si dos personas hacen terraform apply al mismo tiempo sin locking?"
 ```
 
-#### Lab 3.2 — Módulo VPC reutilizable
+#### [Lab 3.2 — Módulo VPC reutilizable](./labs/lab-01-vpc/terraform/README.md)
 ```
 Objetivo: Crear un módulo que cree una VPC completa y usarlo en 2 entornos.
 
@@ -257,7 +263,7 @@ envs/
 Pregunta: "¿Cómo versionas módulos de Terraform en un equipo?"
 ```
 
-#### Lab 3.3 — EKS con Terraform
+#### [Lab 3.3 — EKS con Terraform](./labs/lab-04-eks-cluster/)
 ```hcl
 # Usar el módulo oficial de terraform-aws-modules/eks/aws
 module "eks" {
@@ -298,7 +304,9 @@ module "eks" {
 
 ### 🧪 Labs
 
-#### Lab 4.1 — Pipeline CI/CD con GitLab CI + EKS
+> **Carpeta:** [lab-06-gitlab-cicd](./labs/lab-06-gitlab-cicd/Readme.md) (GitLab → ECR → EKS, OIDC).
+
+#### [Lab 4.1 — Pipeline CI/CD con GitLab CI + EKS](./labs/lab-06-gitlab-cicd/Readme.md)
 ```yaml
 # .gitlab-ci.yml
 stages:
@@ -359,7 +367,7 @@ deploy:
 # Pregunta: "¿Cómo haces rollback automático si kubectl rollout status falla?"
 ```
 
-#### Lab 4.2 — GitLab CI con OIDC (sin access keys estáticas)
+#### [Lab 4.2 — GitLab CI con OIDC (sin access keys estáticas)](./labs/lab-06-gitlab-cicd/Readme.md)
 ```yaml
 # Uso de OIDC para autenticarse con AWS sin AWS_ACCESS_KEY_ID
 # Requiere configurar un IAM Identity Provider en AWS para GitLab
@@ -385,7 +393,7 @@ deploy_oidc:
 # Pregunta: "¿Qué ventaja tiene OIDC sobre access keys en un runner de GitLab?"
 ```
 
-#### Lab 4.3 — Blue/Green Deployment en EKS
+#### [Lab 4.3 — Blue/Green Deployment en EKS](./labs/lab-04-eks-cluster/Readme.md)
 ```
 Objetivo: Implementar Blue/Green usando dos Deployments y cambiar el selector del Service.
 
@@ -417,7 +425,9 @@ Pregunta: "¿Cuándo usarías Canary vs Blue/Green?"
 
 ### 🧪 Labs
 
-#### Lab 5.1 — CloudWatch Container Insights en EKS
+> **Carpeta:** [lab-07-monitoring](./labs/lab-07-monitoring/Readme.md) (Prometheus/Grafana; complementa métricas y alertas).
+
+#### [Lab 5.1 — CloudWatch Container Insights en EKS](./labs/lab-07-monitoring/Readme.md)
 ```bash
 # Habilitar Container Insights
 aws eks create-addon \
@@ -442,7 +452,7 @@ aws cloudwatch put-metric-alarm \
 # Pregunta: "¿Qué es el golden signals monitoring y qué métricas incluye?"
 ```
 
-#### Lab 5.2 — Prometheus + Grafana en EKS
+#### [Lab 5.2 — Prometheus + Grafana en EKS](./labs/lab-07-monitoring/Readme.md)
 ```bash
 # Instalar con Helm
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
@@ -497,6 +507,8 @@ Slow burn alert: burn rate > 3 en 6h
 
 ### 🧪 Labs
 
+> **Referencias:** ejercicios en este README; para práctica STAR/post-mortems usa [§13 Troubleshooting](#13-troubleshooting--incident-reviews).
+
 #### Lab 6.1 — Definir SLIs/SLOs para un servicio real
 ```
 Ejercicio (responde antes de la entrevista):
@@ -519,7 +531,7 @@ Servicio: API de pagos de una aseguradora
 Pregunta de entrevista: "El error budget se agotó el día 20 del mes. ¿Qué haces?"
 ```
 
-#### Lab 6.2 — Post-mortem template
+#### [Lab 6.2 — Post-mortem template](#13-troubleshooting--incident-reviews)
 ```markdown
 # Post-Mortem: [Título del incidente]
 
@@ -607,7 +619,11 @@ kubectl logs -n kube-system -l k8s-app=kube-dns
 - [ ] **GuardDuty**: threat detection, findings, integración con Security Hub
 - [ ] **Container security**: image scanning (ECR), Pod Security Standards, Falco
 
-### 🧪 Lab 8.1 — Secrets en EKS con Secrets Manager
+### 🧪 Labs
+
+> **Carpeta:** [lab-08-secrets-manager](./labs/lab-08-secrets-manager/Readme.md).
+
+#### [Lab 8.1 — Secrets en EKS con Secrets Manager](./labs/lab-08-secrets-manager/Readme.md)
 ```bash
 # Objetivo: Montar un secret de AWS Secrets Manager como volumen en un pod
 
