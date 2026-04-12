@@ -19,7 +19,8 @@
 #   step_04_nat          # tarda ~90s
 #   step_05_routes
 #   step_06_sg
-#   # step_07_ec2        # opcional: EC2 privada t2.micro en subnet privada
+#   # step_06b_ssm_iam  # opcional: solo rol + instance profile SSM (sin EC2)
+#   # step_07_ec2       # opcional: EC2 privada t2.micro + IAM para Session Manager
 #   verify
 #
 #   # Todo de una vez (solo red, sin EC2):
@@ -31,6 +32,7 @@
 # Pre-requisitos:
 #   aws configure  (o AWS_PROFILE exportado)
 #   aws --version >= 2.x
+#   Para step_07_ec2 / step_06b_ssm_iam: permisos IAM (create-role, create-instance-profile, etc.)
 # =============================================================================
 
 set -euo pipefail
@@ -62,6 +64,9 @@ RT_PUB=""
 RT_PRIV=""
 SG_ID=""
 INSTANCE_ID=""
+# Rol + instance profile para SSM (creados en paso 7 o step_06b_ssm_iam)
+SSM_ROLE_NAME="${PROJECT}-private-ec2-ssm"
+SSM_INSTANCE_PROFILE_NAME="${PROJECT}-private-ec2-ssm"
 
 # ---------------------------------------------------------------------------
 # HELPERS
@@ -278,12 +283,66 @@ step_06_sg() {
 }
 
 # ---------------------------------------------------------------------------
+# IAM para Session Manager (EC2)
+# Crea rol de confianza ec2.amazonaws.com + AmazonSSMManagedInstanceCore
+# y un instance profile con el mismo prefijo ${PROJECT}-private-ec2-ssm.
+# Idempotente: si ya existen, no falla.
+# ---------------------------------------------------------------------------
+ensure_ssm_ec2_role_and_profile() {
+  log "IAM: Rol + instance profile para SSM (AmazonSSMManagedInstanceCore)"
+  local policy_arn="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+
+  if aws iam get-role --role-name "$SSM_ROLE_NAME" &>/dev/null; then
+    ok "Rol ya existe: $SSM_ROLE_NAME"
+  else
+    aws iam create-role \
+      --role-name "$SSM_ROLE_NAME" \
+      --description "Lab 01 VPC - EC2 Session Manager" \
+      --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+    aws iam attach-role-policy \
+      --role-name "$SSM_ROLE_NAME" \
+      --policy-arn "$policy_arn"
+    ok "Rol creado: $SSM_ROLE_NAME + AmazonSSMManagedInstanceCore"
+  fi
+
+  if ! aws iam list-attached-role-policies --role-name "$SSM_ROLE_NAME" --output json |
+    grep -q 'AmazonSSMManagedInstanceCore'; then
+    aws iam attach-role-policy \
+      --role-name "$SSM_ROLE_NAME" \
+      --policy-arn "$policy_arn"
+    ok "Politica AmazonSSMManagedInstanceCore adjuntada al rol"
+  fi
+
+  if aws iam get-instance-profile --instance-profile-name "$SSM_INSTANCE_PROFILE_NAME" &>/dev/null; then
+    ok "Instance profile ya existe: $SSM_INSTANCE_PROFILE_NAME"
+  else
+    aws iam create-instance-profile --instance-profile-name "$SSM_INSTANCE_PROFILE_NAME"
+    aws iam add-role-to-instance-profile \
+      --instance-profile-name "$SSM_INSTANCE_PROFILE_NAME" \
+      --role-name "$SSM_ROLE_NAME"
+    ok "Instance profile creado: $SSM_INSTANCE_PROFILE_NAME"
+  fi
+
+  # Propagacion IAM antes de asociar a una nueva EC2
+  log "Esperando propagacion IAM (~10s)..."
+  sleep 10
+  export SSM_ROLE_NAME SSM_INSTANCE_PROFILE_NAME
+}
+
+# Opcional: crear solo el rol/perfil SSM (sin lanzar EC2)
+step_06b_ssm_iam() {
+  ensure_ssm_ec2_role_and_profile
+}
+
+# ---------------------------------------------------------------------------
 # PASO 7 - EC2 privada (opcional)
 # Concepto: lanzar una t2.micro barata en la subnet privada 1.
-#           Para conectarse por SSM necesitas asociar un IAM role adecuado.
+#           Crea (si hace falta) rol IAM + instance profile para Session Manager.
 # ---------------------------------------------------------------------------
 step_07_ec2() {
-  log "PASO 7: Lanzar EC2 t2.micro en subnet privada"
+  log "PASO 7: Lanzar EC2 t2.micro en subnet privada (IAM para SSM)"
+
+  ensure_ssm_ec2_role_and_profile
 
   # Buscar la ultima Amazon Linux 2 disponible en la region
   local ami_id
@@ -299,6 +358,7 @@ step_07_ec2() {
     --instance-type t2.micro \
     --subnet-id "$SUBNET_PRIV_1" \
     --security-group-ids "$SG_ID" \
+    --iam-instance-profile "Name=$SSM_INSTANCE_PROFILE_NAME" \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${PROJECT}-private-ec2}]" \
     --query 'Instances[0].InstanceId' \
     --output text \
@@ -306,7 +366,7 @@ step_07_ec2() {
 
   aws ec2 wait instance-running --instance-ids "$INSTANCE_ID" --region "$REGION"
 
-  ok "EC2 privada lanzada: $INSTANCE_ID (t2.micro, Amazon Linux 2)"
+  ok "EC2 privada lanzada: $INSTANCE_ID (t2.micro, Amazon Linux 2, SSM: $SSM_INSTANCE_PROFILE_NAME)"
   export INSTANCE_ID
 }
 
@@ -329,6 +389,7 @@ verify() {
   echo "  Security Group:   $SG_ID"
   if [[ -n "$INSTANCE_ID" ]]; then
     echo "  EC2 privada:      $INSTANCE_ID"
+    echo "  IAM SSM profile:  $SSM_INSTANCE_PROFILE_NAME"
   fi
   echo ""
   echo "  Rutas en RT privada:"
@@ -365,6 +426,21 @@ cleanup() {
     aws ec2 terminate-instances --instance-ids "$INSTANCE_ID"
     aws ec2 wait instance-terminated --instance-ids "$INSTANCE_ID"
     ok "Instancia EC2 privada terminada: $INSTANCE_ID"
+  fi
+
+  # IAM: instance profile + rol SSM del lab (solo si existen)
+  if aws iam get-instance-profile --instance-profile-name "$SSM_INSTANCE_PROFILE_NAME" &>/dev/null; then
+    aws iam remove-role-from-instance-profile \
+      --instance-profile-name "$SSM_INSTANCE_PROFILE_NAME" \
+      --role-name "$SSM_ROLE_NAME" 2>/dev/null || true
+    aws iam delete-instance-profile \
+      --instance-profile-name "$SSM_INSTANCE_PROFILE_NAME" && ok "Instance profile SSM eliminado: $SSM_INSTANCE_PROFILE_NAME"
+  fi
+  if aws iam get-role --role-name "$SSM_ROLE_NAME" &>/dev/null; then
+    aws iam detach-role-policy \
+      --role-name "$SSM_ROLE_NAME" \
+      --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore 2>/dev/null || true
+    aws iam delete-role --role-name "$SSM_ROLE_NAME" && ok "Rol SSM eliminado: $SSM_ROLE_NAME"
   fi
 
   # SG primero (no tiene dependencias)
