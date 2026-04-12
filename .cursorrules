@@ -288,3 +288,43 @@ Be ready to explain:
 - How CI/CD pipeline handles a failed deployment (rollback strategy)
 - Security posture: what an attacker would need to compromise this setup
 - How you'd add observability (CloudWatch Container Insights, X-Ray tracing)
+
+---
+
+## Repo: epam-aws-devops-prep — AWS DevOps Interview Prep
+
+### Contexto del repo
+
+- Este repo es una guía de estudio y labs prácticos para entrevista EPAM DevOps Cloud Engineer enfocada en AWS, EKS, Terraform, GitLab CI, observabilidad y SRE.
+- `README.md` define bloques de estudio (AWS Core, Kubernetes/EKS, Terraform, CI/CD, Observabilidad, SRE, Linux, Seguridad, Troubleshooting).
+- `labs/` contiene labs prácticos por tema (VPC, IAM, ASG+ALB, EKS, remote state, GitLab CI, monitoring, secrets en EKS, etc.).
+- `troubleshooting/` contiene runbooks y post-mortems listos para respuestas STAR en entrevistas (ej. LibreChat ingress, JWT DST, EKS target group unhealthy, Akamai TLS pinning 5xx).
+
+### Reglas para el asistente (este repo)
+
+- Escribir documentación y comentarios en español, pero mantener comandos, nombres de recursos, APIs y código en inglés.
+- Cuando se generen nuevos labs, seguir el estilo del README:
+  - Objetivo claro.
+  - Pasos numerados reproducibles (idealmente con Terraform/Bash).
+  - Preguntas de entrevista asociadas.
+- Para nuevos documentos en `troubleshooting/`:
+  - Seguir la estructura de los existentes: Resumen, Contexto, Síntomas, Investigación, Causa raíz, Resolución, Timeline, Impacto, 5 Whys, Action Items, STAR.
+- Preferencias de stack:
+  - Terraform como IaC para AWS.
+  - EKS como plataforma de Kubernetes cuando tenga sentido.
+  - GitLab CI → ECR → EKS con OIDC para pipelines.
+  - Observabilidad con CloudWatch, Prometheus/Grafana y Logs Insights.
+- No introducir herramientas nuevas por defecto si ya existe algo similar en el repo; alinear primero con el stack actual.
+- Mantener los ejemplos realistas para entrevista EPAM:
+  - Mostrar buenas prácticas (least privilege, no secrets en código, usar IAM roles, etc.).
+  - Explicar brevemente por qué se toma una decisión (trade-offs), no solo el cómo.
+
+### Preferencias personales
+
+- Evitar código excesivamente verboso; priorizar ejemplos claros y mínimos pero productivos.
+- Cuando se sugieran mejoras, mencionar el impacto en:
+  - Seguridad.
+  - Observabilidad.
+  - Costos.
+  - Operabilidad (on-call, runbooks).
+- Asumir que el usuario ya tiene experiencia real como SRE/Cloud Engineer; evitar explicaciones ultra básicas salvo que se pidan.
