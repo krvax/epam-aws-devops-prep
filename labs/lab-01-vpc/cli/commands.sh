@@ -19,9 +19,10 @@
 #   step_04_nat          # tarda ~90s
 #   step_05_routes
 #   step_06_sg
+#   # step_07_ec2        # opcional: EC2 privada t2.micro en subnet privada
 #   verify
 #
-#   # Todo de una vez:
+#   # Todo de una vez (solo red, sin EC2):
 #   bash commands.sh
 #
 #   # Cleanup al terminar:
@@ -60,6 +61,7 @@ NAT_ID=""
 RT_PUB=""
 RT_PRIV=""
 SG_ID=""
+INSTANCE_ID=""
 
 # ---------------------------------------------------------------------------
 # HELPERS
@@ -276,6 +278,39 @@ step_06_sg() {
 }
 
 # ---------------------------------------------------------------------------
+# PASO 7 - EC2 privada (opcional)
+# Concepto: lanzar una t2.micro barata en la subnet privada 1.
+#           Para conectarse por SSM necesitas asociar un IAM role adecuado.
+# ---------------------------------------------------------------------------
+step_07_ec2() {
+  log "PASO 7: Lanzar EC2 t2.micro en subnet privada"
+
+  # Buscar la ultima Amazon Linux 2 disponible en la region
+  local ami_id
+  ami_id=$(aws ec2 describe-images \
+    --owners amazon \
+    --filters "Name=name,Values=amzn2-ami-hvm-*-x86_64-gp2" "Name=state,Values=available" \
+    --query 'Images | sort_by(@, &CreationDate) | [-1].ImageId' \
+    --output text \
+    --region "$REGION")
+
+  INSTANCE_ID=$(aws ec2 run-instances \
+    --image-id "$ami_id" \
+    --instance-type t2.micro \
+    --subnet-id "$SUBNET_PRIV_1" \
+    --security-group-ids "$SG_ID" \
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${PROJECT}-private-ec2}]" \
+    --query 'Instances[0].InstanceId' \
+    --output text \
+    --region "$REGION")
+
+  aws ec2 wait instance-running --instance-ids "$INSTANCE_ID" --region "$REGION"
+
+  ok "EC2 privada lanzada: $INSTANCE_ID (t2.micro, Amazon Linux 2)"
+  export INSTANCE_ID
+}
+
+# ---------------------------------------------------------------------------
 # VERIFICACION - resumen de recursos y validacion de rutas
 # ---------------------------------------------------------------------------
 verify() {
@@ -292,6 +327,9 @@ verify() {
   echo "  RT Publica:       $RT_PUB"
   echo "  RT Privada:       $RT_PRIV"
   echo "  Security Group:   $SG_ID"
+  if [[ -n "$INSTANCE_ID" ]]; then
+    echo "  EC2 privada:      $INSTANCE_ID"
+  fi
   echo ""
   echo "  Rutas en RT privada:"
   aws ec2 describe-route-tables \
@@ -301,7 +339,7 @@ verify() {
 }
 
 # ---------------------------------------------------------------------------
-# RUN ALL - ejecuta todos los pasos en orden
+# RUN ALL - ejecuta todos los pasos en orden (solo red, sin EC2)
 # ---------------------------------------------------------------------------
 run_all() {
   step_01_vpc
@@ -321,6 +359,13 @@ run_all() {
 # ---------------------------------------------------------------------------
 cleanup() {
   log "CLEANUP: Eliminando recursos del Lab 01 VPC"
+
+  # Instancia EC2 privada (si existe)
+  if [[ -n "$INSTANCE_ID" ]]; then
+    aws ec2 terminate-instances --instance-ids "$INSTANCE_ID"
+    aws ec2 wait instance-terminated --instance-ids "$INSTANCE_ID"
+    ok "Instancia EC2 privada terminada: $INSTANCE_ID"
+  fi
 
   # SG primero (no tiene dependencias)
   [[ -n "$SG_ID" ]] && \
