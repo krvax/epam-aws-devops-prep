@@ -64,15 +64,144 @@ RT_PUB=""
 RT_PRIV=""
 SG_ID=""
 INSTANCE_ID=""
+WEB_INSTANCE_ID=""
+SG_WEB=""
 # Rol + instance profile para SSM (creados en paso 7 o step_06b_ssm_iam)
 SSM_ROLE_NAME="${PROJECT}-private-ec2-ssm"
 SSM_INSTANCE_PROFILE_NAME="${PROJECT}-private-ec2-ssm"
+
+# Archivo de estado local (mini .tfstate casero)
+STATE_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.lab-state"
 
 # ---------------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------------
 log() { echo -e "\n>>> $*"; }
 ok()  { echo "    OK: $*"; }
+
+# ---------------------------------------------------------------------------
+# ESTADO - guardar y recuperar IDs (solucion al problema de variables perdidas)
+# Concepto: esto es exactamente lo que Terraform hace con .tfstate
+#           pero en version minima. Sin esto, al cerrar la terminal
+#           pierdes todos los IDs y cleanup no puede borrar nada.
+# ---------------------------------------------------------------------------
+save_state() {
+  cat > "$STATE_FILE" <<EOF
+VPC_ID=$VPC_ID
+SUBNET_PUB_1=$SUBNET_PUB_1
+SUBNET_PUB_2=$SUBNET_PUB_2
+SUBNET_PRIV_1=$SUBNET_PRIV_1
+SUBNET_PRIV_2=$SUBNET_PRIV_2
+IGW_ID=$IGW_ID
+EIP_ALLOC=$EIP_ALLOC
+NAT_ID=$NAT_ID
+RT_PUB=$RT_PUB
+RT_PRIV=$RT_PRIV
+SG_ID=$SG_ID
+INSTANCE_ID=$INSTANCE_ID
+WEB_INSTANCE_ID=$WEB_INSTANCE_ID
+SG_WEB=$SG_WEB
+EOF
+  ok "Estado guardado en $STATE_FILE"
+}
+
+load_state() {
+  if [[ -f "$STATE_FILE" ]]; then
+    source "$STATE_FILE"
+    ok "Estado cargado desde $STATE_FILE"
+  else
+    log "No se encontro archivo de estado, intentando recuperar por tags..."
+    recover_state_from_aws
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# RECUPERAR ESTADO DESDE AWS (fallback si no hay archivo .lab-state)
+# Busca recursos por tags Name=epam-lab-* y rellena las variables.
+# ---------------------------------------------------------------------------
+recover_state_from_aws() {
+  log "Recuperando IDs desde AWS por tags (Name=${PROJECT}-*)..."
+
+  VPC_ID=$(aws ec2 describe-vpcs \
+    --filters "Name=tag:Name,Values=${PROJECT}-vpc" \
+    --query 'Vpcs[0].VpcId' --output text 2>/dev/null || echo "")
+  [[ "$VPC_ID" == "None" ]] && VPC_ID=""
+
+  SUBNET_PUB_1=$(aws ec2 describe-subnets \
+    --filters "Name=tag:Name,Values=${PROJECT}-public-${AZ1}" \
+    --query 'Subnets[0].SubnetId' --output text 2>/dev/null || echo "")
+  [[ "$SUBNET_PUB_1" == "None" ]] && SUBNET_PUB_1=""
+
+  SUBNET_PUB_2=$(aws ec2 describe-subnets \
+    --filters "Name=tag:Name,Values=${PROJECT}-public-${AZ2}" \
+    --query 'Subnets[0].SubnetId' --output text 2>/dev/null || echo "")
+  [[ "$SUBNET_PUB_2" == "None" ]] && SUBNET_PUB_2=""
+
+  SUBNET_PRIV_1=$(aws ec2 describe-subnets \
+    --filters "Name=tag:Name,Values=${PROJECT}-private-${AZ1}" \
+    --query 'Subnets[0].SubnetId' --output text 2>/dev/null || echo "")
+  [[ "$SUBNET_PRIV_1" == "None" ]] && SUBNET_PRIV_1=""
+
+  SUBNET_PRIV_2=$(aws ec2 describe-subnets \
+    --filters "Name=tag:Name,Values=${PROJECT}-private-${AZ2}" \
+    --query 'Subnets[0].SubnetId' --output text 2>/dev/null || echo "")
+  [[ "$SUBNET_PRIV_2" == "None" ]] && SUBNET_PRIV_2=""
+
+  IGW_ID=$(aws ec2 describe-internet-gateways \
+    --filters "Name=tag:Name,Values=${PROJECT}-igw" \
+    --query 'InternetGateways[0].InternetGatewayId' --output text 2>/dev/null || echo "")
+  [[ "$IGW_ID" == "None" ]] && IGW_ID=""
+
+  NAT_ID=$(aws ec2 describe-nat-gateways \
+    --filter "Name=tag:Name,Values=${PROJECT}-nat-gw" "Name=state,Values=available" \
+    --query 'NatGateways[0].NatGatewayId' --output text 2>/dev/null || echo "")
+  [[ "$NAT_ID" == "None" ]] && NAT_ID=""
+
+  # EIP: buscar la que esta asociada al NAT, o cualquier EIP sin asociar del lab
+  if [[ -n "$NAT_ID" ]]; then
+    EIP_ALLOC=$(aws ec2 describe-nat-gateways \
+      --nat-gateway-ids "$NAT_ID" \
+      --query 'NatGateways[0].NatGatewayAddresses[0].AllocationId' --output text 2>/dev/null || echo "")
+    [[ "$EIP_ALLOC" == "None" ]] && EIP_ALLOC=""
+  fi
+
+  RT_PUB=$(aws ec2 describe-route-tables \
+    --filters "Name=tag:Name,Values=${PROJECT}-public-rt" \
+    --query 'RouteTables[0].RouteTableId' --output text 2>/dev/null || echo "")
+  [[ "$RT_PUB" == "None" ]] && RT_PUB=""
+
+  RT_PRIV=$(aws ec2 describe-route-tables \
+    --filters "Name=tag:Name,Values=${PROJECT}-private-rt" \
+    --query 'RouteTables[0].RouteTableId' --output text 2>/dev/null || echo "")
+  [[ "$RT_PRIV" == "None" ]] && RT_PRIV=""
+
+  SG_ID=$(aws ec2 describe-security-groups \
+    --filters "Name=tag:Name,Values=${PROJECT}-private-ec2-sg" \
+    --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "")
+  [[ "$SG_ID" == "None" ]] && SG_ID=""
+
+  SG_WEB=$(aws ec2 describe-security-groups \
+    --filters "Name=tag:Name,Values=${PROJECT}-web-sg" \
+    --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "")
+  [[ "$SG_WEB" == "None" ]] && SG_WEB=""
+
+  INSTANCE_ID=$(aws ec2 describe-instances \
+    --filters "Name=tag:Name,Values=${PROJECT}-private-ec2" "Name=instance-state-name,Values=running,stopped" \
+    --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null || echo "")
+  [[ "$INSTANCE_ID" == "None" ]] && INSTANCE_ID=""
+
+  WEB_INSTANCE_ID=$(aws ec2 describe-instances \
+    --filters "Name=tag:Name,Values=${PROJECT}-web-ec2" "Name=instance-state-name,Values=running,stopped" \
+    --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null || echo "")
+  [[ "$WEB_INSTANCE_ID" == "None" ]] && WEB_INSTANCE_ID=""
+
+  ok "Recuperado: VPC=$VPC_ID IGW=$IGW_ID NAT=$NAT_ID"
+  ok "Recuperado: PUB1=$SUBNET_PUB_1 PUB2=$SUBNET_PUB_2"
+  ok "Recuperado: PRIV1=$SUBNET_PRIV_1 PRIV2=$SUBNET_PRIV_2"
+  ok "Recuperado: RT_PUB=$RT_PUB RT_PRIV=$RT_PRIV"
+  ok "Recuperado: SG=$SG_ID SG_WEB=$SG_WEB"
+  ok "Recuperado: EC2=$INSTANCE_ID WEB=$WEB_INSTANCE_ID"
+}
 
 # ---------------------------------------------------------------------------
 # PASO 1 - VPC
@@ -101,7 +230,7 @@ step_01_vpc() {
     --tags "Key=Name,Value=${PROJECT}-vpc" "Key=ManagedBy,Value=cli-lab"
 
   ok "VPC creada: $VPC_ID"
-  export VPC_ID
+  save_state
 }
 
 # ---------------------------------------------------------------------------
@@ -158,7 +287,7 @@ step_02_subnets() {
     --tags "Key=Name,Value=${PROJECT}-private-${AZ2}" "Key=Tier,Value=private"
   ok "Subnet privada AZ2: $SUBNET_PRIV_2"
 
-  export SUBNET_PUB_1 SUBNET_PUB_2 SUBNET_PRIV_1 SUBNET_PRIV_2
+  save_state
 }
 
 # ---------------------------------------------------------------------------
@@ -180,7 +309,7 @@ step_03_igw() {
     --vpc-id "$VPC_ID"
 
   ok "IGW creado y adjuntado: $IGW_ID"
-  export IGW_ID
+  save_state
 }
 
 # ---------------------------------------------------------------------------
@@ -211,7 +340,7 @@ step_04_nat() {
     --tags "Key=Name,Value=${PROJECT}-nat-gw" 2>/dev/null || true
 
   ok "NAT Gateway disponible: $NAT_ID"
-  export EIP_ALLOC NAT_ID
+  save_state
 }
 
 # ---------------------------------------------------------------------------
@@ -256,7 +385,7 @@ step_05_routes() {
   aws ec2 associate-route-table --route-table-id "$RT_PRIV" --subnet-id "$SUBNET_PRIV_2"
   ok "Route Table privada: $RT_PRIV -> $NAT_ID"
 
-  export RT_PUB RT_PRIV
+  save_state
 }
 
 # ---------------------------------------------------------------------------
@@ -279,7 +408,7 @@ step_06_sg() {
   # Solo egress: SSM no necesita inbound
   # El inbound ya esta denegado por default (no agregamos reglas ingress)
   ok "Security Group: $SG_ID (solo egress abierto)"
-  export SG_ID
+  save_state
 }
 
 # ---------------------------------------------------------------------------
@@ -326,7 +455,6 @@ ensure_ssm_ec2_role_and_profile() {
   # Propagacion IAM antes de asociar a una nueva EC2
   log "Esperando propagacion IAM (~10s)..."
   sleep 10
-  export SSM_ROLE_NAME SSM_INSTANCE_PROFILE_NAME
 }
 
 # Opcional: crear solo el rol/perfil SSM (sin lanzar EC2)
@@ -367,36 +495,43 @@ step_07_ec2() {
   aws ec2 wait instance-running --instance-ids "$INSTANCE_ID" --region "$REGION"
 
   ok "EC2 privada lanzada: $INSTANCE_ID (t2.micro, Amazon Linux 2, SSM: $SSM_INSTANCE_PROFILE_NAME)"
-  export INSTANCE_ID
+  log "Conectar con: aws ssm start-session --target $INSTANCE_ID"
+  save_state
 }
 
 # ---------------------------------------------------------------------------
 # VERIFICACION - resumen de recursos y validacion de rutas
 # ---------------------------------------------------------------------------
 verify() {
+  # Intentar cargar estado si las variables estan vacias
+  [[ -z "$VPC_ID" ]] && load_state
+
   log "VERIFICACION: Resumen de recursos creados"
   echo ""
-  echo "  VPC:              $VPC_ID"
-  echo "  Subnet publica 1: $SUBNET_PUB_1  ($PUB_CIDR_1 / $AZ1)"
-  echo "  Subnet publica 2: $SUBNET_PUB_2  ($PUB_CIDR_2 / $AZ2)"
-  echo "  Subnet privada 1: $SUBNET_PRIV_1 ($PRIV_CIDR_1 / $AZ1)"
-  echo "  Subnet privada 2: $SUBNET_PRIV_2 ($PRIV_CIDR_2 / $AZ2)"
-  echo "  IGW:              $IGW_ID"
-  echo "  EIP Alloc:        $EIP_ALLOC"
-  echo "  NAT Gateway:      $NAT_ID"
-  echo "  RT Publica:       $RT_PUB"
-  echo "  RT Privada:       $RT_PRIV"
-  echo "  Security Group:   $SG_ID"
-  if [[ -n "$INSTANCE_ID" ]]; then
-    echo "  EC2 privada:      $INSTANCE_ID"
-    echo "  IAM SSM profile:  $SSM_INSTANCE_PROFILE_NAME"
-  fi
+  echo "  VPC:              ${VPC_ID:-(no creada)}"
+  echo "  Subnet publica 1: ${SUBNET_PUB_1:-(no creada)}  ($PUB_CIDR_1 / $AZ1)"
+  echo "  Subnet publica 2: ${SUBNET_PUB_2:-(no creada)}  ($PUB_CIDR_2 / $AZ2)"
+  echo "  Subnet privada 1: ${SUBNET_PRIV_1:-(no creada)} ($PRIV_CIDR_1 / $AZ1)"
+  echo "  Subnet privada 2: ${SUBNET_PRIV_2:-(no creada)} ($PRIV_CIDR_2 / $AZ2)"
+  echo "  IGW:              ${IGW_ID:-(no creado)}"
+  echo "  EIP Alloc:        ${EIP_ALLOC:-(no creada)}"
+  echo "  NAT Gateway:      ${NAT_ID:-(no creado)}"
+  echo "  RT Publica:       ${RT_PUB:-(no creada)}"
+  echo "  RT Privada:       ${RT_PRIV:-(no creada)}"
+  echo "  Security Group:   ${SG_ID:-(no creado)}"
+  [[ -n "$INSTANCE_ID" ]] && echo "  EC2 privada:      $INSTANCE_ID"
+  [[ -n "$WEB_INSTANCE_ID" ]] && echo "  EC2 web:          $WEB_INSTANCE_ID"
+  [[ -n "$SG_WEB" ]] && echo "  SG Web:           $SG_WEB"
+  echo "  IAM SSM profile:  $SSM_INSTANCE_PROFILE_NAME"
   echo ""
-  echo "  Rutas en RT privada:"
-  aws ec2 describe-route-tables \
-    --route-table-ids "$RT_PRIV" \
-    --query 'RouteTables[0].Routes[*].[DestinationCidrBlock,NatGatewayId,State]' \
-    --output table
+
+  if [[ -n "$RT_PRIV" ]]; then
+    echo "  Rutas en RT privada:"
+    aws ec2 describe-route-tables \
+      --route-table-ids "$RT_PRIV" \
+      --query 'RouteTables[0].Routes[*].[DestinationCidrBlock,NatGatewayId,State]' \
+      --output table
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -411,6 +546,7 @@ run_all() {
   step_06_sg
   verify
   log "Lab 01 VPC completo via CLI."
+  log "Estado guardado en: $STATE_FILE"
   log "Para destruir ejecuta: cleanup"
 }
 
@@ -421,11 +557,21 @@ run_all() {
 cleanup() {
   log "CLEANUP: Eliminando recursos del Lab 01 VPC"
 
+  # Cargar estado si las variables estan vacias
+  [[ -z "$VPC_ID" ]] && load_state
+
+  # EC2 web publica (si existe)
+  if [[ -n "$WEB_INSTANCE_ID" ]]; then
+    aws ec2 terminate-instances --instance-ids "$WEB_INSTANCE_ID"
+    aws ec2 wait instance-terminated --instance-ids "$WEB_INSTANCE_ID"
+    ok "EC2 web terminada: $WEB_INSTANCE_ID"
+  fi
+
   # Instancia EC2 privada (si existe)
   if [[ -n "$INSTANCE_ID" ]]; then
     aws ec2 terminate-instances --instance-ids "$INSTANCE_ID"
     aws ec2 wait instance-terminated --instance-ids "$INSTANCE_ID"
-    ok "Instancia EC2 privada terminada: $INSTANCE_ID"
+    ok "EC2 privada terminada: $INSTANCE_ID"
   fi
 
   # IAM: instance profile + rol SSM del lab (solo si existen)
@@ -443,7 +589,11 @@ cleanup() {
     aws iam delete-role --role-name "$SSM_ROLE_NAME" && ok "Rol SSM eliminado: $SSM_ROLE_NAME"
   fi
 
-  # SG primero (no tiene dependencias)
+  # SG web (si existe)
+  [[ -n "$SG_WEB" ]] && \
+    aws ec2 delete-security-group --group-id "$SG_WEB" && ok "SG Web eliminado"
+
+  # SG privado
   [[ -n "$SG_ID" ]] && \
     aws ec2 delete-security-group --group-id "$SG_ID" && ok "SG eliminado"
 
@@ -453,9 +603,9 @@ cleanup() {
       ASSOC_IDS=$(aws ec2 describe-route-tables \
         --route-table-ids "$RT" \
         --query 'RouteTables[0].Associations[?Main==`false`].RouteTableAssociationId' \
-        --output text)
+        --output text 2>/dev/null || echo "")
       for id in $ASSOC_IDS; do
-        aws ec2 disassociate-route-table --association-id "$id"
+        [[ "$id" != "None" ]] && aws ec2 disassociate-route-table --association-id "$id"
       done
       aws ec2 delete-route-table --route-table-id "$RT" && ok "RT eliminada: $RT"
     fi
@@ -489,6 +639,9 @@ cleanup() {
   # VPC al final (cuando ya no tiene dependencias)
   [[ -n "$VPC_ID" ]] && \
     aws ec2 delete-vpc --vpc-id "$VPC_ID" && ok "VPC eliminada"
+
+  # Limpiar archivo de estado
+  [[ -f "$STATE_FILE" ]] && rm -f "$STATE_FILE" && ok "Archivo de estado eliminado"
 
   log "Cleanup completo. Sin recursos huerfanos."
 }
