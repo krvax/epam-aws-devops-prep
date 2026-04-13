@@ -1,0 +1,3 @@
+[submodule "labs/lab-11-gitlab-oidc-mini"]
+	path = labs/lab-11-gitlab-oidc-mini
+	url = git@gitlab.com:krvax/gitlab-oidc.git
